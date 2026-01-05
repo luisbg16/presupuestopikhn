@@ -262,8 +262,7 @@ function App() {
             </select>
             <input type="number" placeholder="Monto" style={inputStyle} value={compra.monto} onChange={e=>setCompra({...compra, monto:e.target.value})} />
             <input type="text" placeholder="Concepto" style={inputStyle} value={compra.desc} onChange={e=>setCompra({...compra, desc:e.target.value})} />
-            <label style={cameraBtn}><Camera size={18}/> {compra.foto ? "LISTO ✅" : "ADJUNTAR"} <input type="file" accept="image/*" capture="environment" hidden onChange={e=>setCompra({...compra, foto:e.target.files[0]})} /></label>
-            <button onClick={registrarGasto} style={{...btn, background: COLOR_PIKHN}} disabled={loading}>{loading ? "PROCESANDO..." : "REGISTRAR"}</button>
+<label style={cameraBtn}><Camera size={18}/> {compra.foto ? "ARCHIVO LISTO ✅" : "ADJUNTAR FOTO O PDF"} <input type="file" accept="image/*,.pdf" hidden onChange={e=>setCompra({...compra, foto:e.target.files[0]})} /></label>            <button onClick={registrarGasto} style={{...btn, background: COLOR_PIKHN}} disabled={loading}>{loading ? "PROCESANDO..." : "REGISTRAR"}</button>
           </div>
         )}
 
