@@ -175,7 +175,6 @@ function App() {
     } catch (e) { alert(e.message); } finally { setLoading(false); }
   };
 
-  // Función interna para calcular saldo acumulado para el select
   const calcularSaldoParaSelect = (lineaNombre, responsable, fecha) => {
     const mesIdx = new Date(fecha + 'T12:00:00').getMonth();
     return lineas
@@ -250,7 +249,9 @@ function App() {
                 </div>
                 <div style={{...card, marginTop:'15px'}}>
                     <h3 style={cardTitle}><AlertTriangle size={18}/> DETALLE POR LÍNEA</h3>
-                    {stats.ranking.sort((a,b)=>(b.inicial-b.actual)-(a.inicial-a.actual)).slice(0, 20).map(linea => {
+                    {stats.ranking
+                      .filter(linea => tipoVista === 'anual' || linea.inicial > 0) // <--- FILTRO AGREGADO AQUÍ
+                      .sort((a,b)=>(b.inicial-b.actual)-(a.inicial-a.actual)).slice(0, 20).map(linea => {
                         const gastado = linea.inicial - linea.actual;
                         const porc = linea.inicial > 0 ? (gastado / linea.inicial) * 100 : 0;
                         return (
@@ -347,9 +348,9 @@ function App() {
 
         {seccion === 'config' && esAdmin && (
             <div style={card}>
-                <h3 style={cardTitle}><UploadCloud size={18}/> CARGA DE DATOS</h3>
+                <h3 style={cardTitle}><UploadCloud size={18}/> CARGAR PRESUPUESTO</h3>
                 <input type="file" accept=".xlsx, .xls" style={{margin:'20px 0', fontSize:'12px'}} onChange={e=>setArchivoExcel(e.target.files[0])} />
-                <button onClick={importarExcelPikHN} style={{...btn, background: COLOR_AZUL_CONTABLE}} disabled={loading}>REEMPLAZAR PRESUPUESTO</button>
+                <button onClick={importarExcelPikHN} style={{...btn, background: COLOR_AZUL_CONTABLE}} disabled={loading}>Cargar presupuesto</button>
             </div>
         )}
       </main>
