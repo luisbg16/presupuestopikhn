@@ -3,7 +3,7 @@ import { createClient } from '@supabase/supabase-js';
 import * as XLSX from 'xlsx';
 import { 
   LayoutDashboard, Receipt, UploadCloud, History, 
-  Camera, LogOut, ShieldCheck, TrendingUp, AlertTriangle, Eye, FileSpreadsheet, BarChart3, ListFilter, Download
+  Camera, LogOut, ShieldCheck, TrendingUp, AlertTriangle, Eye, FileSpreadsheet, BarChart3, ListFilter, Download, Info, AlertCircle
 } from 'lucide-react';
 
 const supabase = createClient(import.meta.env.VITE_SUPABASE_URL, import.meta.env.VITE_SUPABASE_ANON_KEY);
@@ -13,7 +13,7 @@ const COLOR_PIKHN = "#1e3563";
 const COLOR_AZUL_CONTABLE = "#0096d2"; 
 const COLOR_ACCENT = "#ffd100";
 
-const normalizar = (str) => str?.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+const normalizar = (str) => str?.toString().normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim() || "";
 
 const ADMIN_EMAIL = "administracion@procoopsa.com";
 const CORES_ADMIN_EXTENDIDO = [ADMIN_EMAIL, "cavendano@chorotega.hn", "mrodriguez@chorotega.hn"];
@@ -55,7 +55,7 @@ function App() {
   };
 
   const importarExcelPikHN = async () => {
-    if (!archivoExcel) return alert("Selecciona un archivo");
+    if (!archivoExcel) return alert("Selecciona un archivo primero");
     setLoading(true);
     const reader = new FileReader();
     reader.readAsArrayBuffer(archivoExcel);
@@ -68,28 +68,30 @@ function App() {
         const mapaMeses = { "enero": "Ene", "febrero": "Feb", "marzo": "Mar", "abril": "Abr", "mayo": "May", "junio": "Jun", "julio": "Jul", "agosto": "Ago", "septiembre": "Sep", "octubre": "Oct", "noviembre": "Nov", "diciembre": "Dic" };
         const filasParaSubir = [];
         json.forEach((filaRaw) => {
-          const fila = Object.keys(filaRaw).reduce((acc, key) => { acc[key.toLowerCase().trim()] = filaRaw[key]; return acc; }, {});
-          const nombreLinea = fila["línea"] || fila["linea"];
+          const fila = {};
+          Object.keys(filaRaw).forEach(k => { fila[normalizar(k)] = filaRaw[k]; });
+          const nombreLinea = fila["linea"] || fila["línea"];
           const responsableTienda = fila["responsable"] || fila["tienda"];
           let tGasto = fila["tipo de gasto"] || fila["tipo"] || "Administracion";
-          
-          if (normalizar(tGasto).includes("administracion")) tGasto = "Administracion";
-          if (normalizar(tGasto).includes("personal")) tGasto = "Personal";
-          if (normalizar(tGasto).includes("venta")) tGasto = "Venta";
-
-          if (nombreLinea && responsableTienda && !nombreLinea.toString().toLowerCase().includes("total")) {
+          if (nombreLinea && responsableTienda && !normalizar(nombreLinea).includes("total")) {
             Object.keys(mapaMeses).forEach(mesExcel => {
-              const mesSistema = mapaMeses[mesExcel];
-              let monto = parseFloat(fila[mesExcel]?.toString().replace(/[^\d.]/g, "")) || 0;
-              filasParaSubir.push({ linea_nombre: nombreLinea.toString().trim(), responsable: responsableTienda.toString().trim(), tipo_gasto: tGasto, mes: mesSistema, monto_inicial: monto, monto_actual: monto });
+              if (fila[mesExcel] !== undefined) {
+                const mesSistema = mapaMeses[mesExcel];
+                let monto = parseFloat(fila[mesExcel]?.toString().replace(/[^\d.]/g, "")) || 0;
+                filasParaSubir.push({ 
+                  linea_nombre: nombreLinea.toString().trim(), responsable: responsableTienda.toString().trim(), 
+                  tipo_gasto: tGasto, mes: mesSistema, monto_inicial: monto, monto_actual: monto,
+                  sobregiro_monto: 0, sobregiro_mes_destino: null
+                });
+              }
             });
           }
         });
         await supabase.from('presupuestos').delete().neq('id', 0);
         await supabase.from('presupuestos').insert(filasParaSubir);
-        alert("✅ Presupuesto cargado exitosamente");
+        alert(`✅ Éxito: ${filasParaSubir.length} líneas cargadas.`);
         obtenerDatos();
-      } catch (err) { alert(err.message); } finally { setLoading(false); }
+      } catch (err) { alert("Error: " + err.message); } finally { setLoading(false); }
     };
   };
 
@@ -97,56 +99,41 @@ function App() {
     const filtradas = lineas.filter(l => (tiendaActiva === 'TODAS' || l.responsable === tiendaActiva) && (tipoVista === 'anual' ? true : l.mes === mesFiltro));
     const tP = filtradas.reduce((a, b) => a + b.monto_inicial, 0);
     const tD = filtradas.reduce((a, b) => a + b.monto_actual, 0);
-    
     const ranking = Object.values(filtradas.reduce((acc, curr) => {
-      if (!acc[curr.linea_nombre]) acc[curr.linea_nombre] = { nombre: curr.linea_nombre, inicial: 0, actual: 0, tipo: curr.tipo_gasto };
-      acc[curr.linea_nombre].inicial += curr.monto_inicial;
-      acc[curr.linea_nombre].actual += curr.monto_actual;
+      const key = `${curr.linea_nombre}_${curr.responsable}`;
+      if (!acc[key]) acc[key] = { ...curr, nombre: curr.linea_nombre, inicial: 0, actual: 0, tipo: curr.tipo_gasto, sobregiro_acumulado: 0 };
+      acc[key].inicial += curr.monto_inicial;
+      acc[key].actual += curr.monto_actual;
+      acc[key].sobregiro_acumulado += (curr.sobregiro_monto || 0);
       return acc;
     }, {}));
-
     const porTipoGasto = ["Administracion", "Personal", "Venta"].map(t => {
-        const sub = filtradas.filter(l => normalizar(l.tipo_gasto) === normalizar(t));
+        const sub = filtradas.filter(l => normalizar(l.tipo_gasto || "") === normalizar(t));
         const ini = sub.reduce((a, b) => a + b.monto_inicial, 0);
         const act = sub.reduce((a, b) => a + b.monto_actual, 0);
         return { tipo: t, inicial: ini, gastado: ini - act };
     });
-
     return { totalP: tP, totalG: tP - tD, totalD: tD, ranking, porTipoGasto, porcGlobal: tP > 0 ? ((tP - tD) / tP) * 100 : 0 };
   }, [lineas, tiendaActiva, mesFiltro, tipoVista]);
 
   const descargarReporteCompleto = () => {
-    const data = stats.ranking.map(l => {
-        const gastado = l.inicial - l.actual;
-        const cumplimiento = l.inicial > 0 ? ((gastado / l.inicial) * 100).toFixed(1) + "%" : "0%";
-        return {
-            "Línea de Gasto": l.nombre,
-            "Tipo": l.tipo,
-            "Tienda/Sede": tiendaActiva,
-            "Presupuesto": l.inicial,
-            "Gasto Real": gastado,
-            "Saldo Disponible": l.actual,
-            "% Cumplimiento": cumplimiento
-        };
-    });
+    const data = stats.ranking.map(l => ({
+        "Línea de Gasto": l.nombre, "Tienda": l.responsable, "Presupuesto": l.inicial, "Gastado": l.inicial - l.actual, "Saldo": l.actual
+    }));
     const ws = XLSX.utils.json_to_sheet(data);
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Reporte_PikHN");
-    XLSX.writeFile(wb, `Reporte_General_${tiendaActiva}.xlsx`);
+    XLSX.utils.book_append_sheet(wb, ws, "Reporte");
+    XLSX.writeFile(wb, `Reporte_General.xlsx`);
   };
 
   const descargarDetalleExcel = (tipo) => {
     const data = stats.ranking.filter(l => normalizar(l.tipo) === normalizar(tipo)).map(l => ({
-        "Línea": l.nombre,
-        "Presupuesto": l.inicial,
-        "Gasto Real": l.inicial - l.actual,
-        "Saldo": l.actual,
-        "% Cumplimiento": l.inicial > 0 ? (((l.inicial - l.actual) / l.inicial) * 100).toFixed(1) + "%" : "0%"
+        "Línea": l.nombre, "Presupuesto": l.inicial, "Gasto Real": l.inicial - l.actual, "Saldo": l.actual
     }));
     const ws = XLSX.utils.json_to_sheet(data);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, tipo);
-    XLSX.writeFile(wb, `Analisis_${tipo}_${tiendaActiva}.xlsx`);
+    XLSX.writeFile(wb, `Analisis_${tipo}.xlsx`);
   };
 
   const registrarGasto = async () => {
@@ -155,14 +142,32 @@ function App() {
     const fechaObj = new Date(compra.fecha + 'T12:00:00');
     const mesGastoIdx = fechaObj.getMonth();
     const lineaSel = lineas.find(l => l.id.toString() === compra.lineaId.toString());
+    const esEspecial = normalizar(lineaSel.linea_nombre).includes("energia") || normalizar(lineaSel.linea_nombre).includes("internet");
+    
     const lineasDisponibles = lineas.filter(l => l.linea_nombre === lineaSel.linea_nombre && l.responsable === lineaSel.responsable && MESES_SISTEMA.indexOf(l.mes) <= mesGastoIdx).sort((a, b) => MESES_SISTEMA.indexOf(a.mes) - MESES_SISTEMA.indexOf(b.mes));
     const disponible = lineasDisponibles.reduce((a, b) => a + b.monto_actual, 0);
 
-    if (montoGasto > disponible) return alert("Saldo insuficiente.");
+    let requiereSobregiro = false;
+    let montoAsobregirar = 0;
+    let mesDestino = "";
+
+    if (montoGasto > disponible) {
+        if (!esEspecial) return alert("Saldo insuficiente.");
+        requiereSobregiro = true;
+        montoAsobregirar = montoGasto - disponible;
+        const sigMesIdx = mesGastoIdx + 1;
+        mesDestino = sigMesIdx < 12 ? MESES_SISTEMA[sigMesIdx] : "Periodo Siguiente";
+
+        // EL BOTÓN DE CANCELAR: window.confirm permite detener el proceso
+        const confirmar = window.confirm(`🚨 AVISO DE SOBREGIRO DETECTADO\n\nEl gasto es de L${montoGasto.toLocaleString()} pero solo hay L${disponible.toLocaleString()} disponibles.\n\nSe restarán L${montoAsobregirar.toLocaleString()} del presupuesto de ${mesDestino}.\n\n¿Deseas continuar con el registro?`);
+        if (!confirmar) return; // Si cancela, no hace nada.
+    }
+
     setLoading(true);
     try {
       const nombreFoto = `${Date.now()}.${compra.foto.name.split('.').pop()}`;
       await supabase.storage.from('facturas').upload(nombreFoto, compra.foto);
+      
       let restante = montoGasto;
       for (let l of lineasDisponibles) {
         if (restante <= 0) break;
@@ -170,16 +175,24 @@ function App() {
         await supabase.from('presupuestos').update({ monto_actual: l.monto_actual - quitar }).eq('id', l.id);
         restante -= quitar;
       }
+      
+      if (requiereSobregiro) {
+          const sigMesIdx = mesGastoIdx + 1;
+          const lSiguiente = lineas.find(l => l.linea_nombre === lineaSel.linea_nombre && l.responsable === lineaSel.responsable && MESES_SISTEMA.indexOf(l.mes) === sigMesIdx);
+          if (lSiguiente) {
+              await supabase.from('presupuestos').update({ monto_actual: lSiguiente.monto_actual - montoAsobregirar }).eq('id', lSiguiente.id);
+          }
+          await supabase.from('presupuestos').update({ sobregiro_monto: montoAsobregirar, sobregiro_mes_destino: mesDestino }).eq('id', lineaSel.id);
+      }
+
       await supabase.from('compras').insert([{ presupuesto_id: lineaSel.id, monto_lps: montoGasto, descripcion: compra.desc, fecha: compra.fecha, url_factura: nombreFoto, creado_por: session.user.email }]);
-      alert("✅ Gasto registrado"); setCompra({ ...compra, monto: '', desc: '', foto: null, lineaId: '' }); obtenerDatos();
+      alert("✅ Gasto registrado exitosamente"); setCompra({ ...compra, monto: '', desc: '', foto: null, lineaId: '' }); obtenerDatos();
     } catch (e) { alert(e.message); } finally { setLoading(false); }
   };
 
   const calcularSaldoParaSelect = (lineaNombre, responsable, fecha) => {
     const mesIdx = new Date(fecha + 'T12:00:00').getMonth();
-    return lineas
-      .filter(l => l.linea_nombre === lineaNombre && l.responsable === responsable && MESES_SISTEMA.indexOf(l.mes) <= mesIdx)
-      .reduce((a, b) => a + b.monto_actual, 0);
+    return lineas.filter(l => l.linea_nombre === lineaNombre && l.responsable === responsable && MESES_SISTEMA.indexOf(l.mes) <= mesIdx).reduce((a, b) => a + b.monto_actual, 0);
   };
 
   if (!session) return (
@@ -189,7 +202,8 @@ function App() {
         <form onSubmit={async (e)=>{e.preventDefault(); const {error}=await supabase.auth.signInWithPassword({email, password}); if(error) alert("Error de acceso");}}>
           <input type="email" placeholder="Usuario" style={inputStyle} onChange={e=>setEmail(e.target.value)} />
           <input type="password" placeholder="Contraseña" style={inputStyle} onChange={e=>setPassword(e.target.value)} />
-          <button type="submit" style={{...btn, background: COLOR_PIKHN}}>INGRESAR</button>
+          {/* BOTÓN LOGIN CORREGIDO */}
+          <button type="submit" style={{...btn, background: COLOR_PIKHN, color: 'white'}}>INGRESAR</button>
         </form>
       </div>
     </div>
@@ -211,8 +225,8 @@ function App() {
                         <button onClick={()=>setTipoVista('anual')} style={tipoVista==='anual'?toggleActive:toggleInactive}>AÑO</button>
                     </div>
                     <div style={{display:'flex', gap:'5px', flex:1, justifyContent:'flex-end'}}>
-                      <button onClick={descargarReporteCompleto} style={eyeBtn} title="Descargar Reporte Completo"><FileSpreadsheet size={18} color={COLOR_AZUL_CONTABLE}/></button>
-                      {esAdmin && <select style={{...inputStyle, width:'auto', marginBottom:0, padding:'6px'}} value={tiendaFiltro} onChange={e=>setTiendaFiltro(e.target.value)}><option value="TODAS">TODAS</option><option value="SPS">SPS</option><option value="Choluteca">Choluteca</option><option value="VA">VA</option><option value="Nacional">Nacional</option></select>}
+                      <button onClick={descargarReporteCompleto} style={eyeBtn}><FileSpreadsheet size={18} color={COLOR_AZUL_CONTABLE}/></button>
+                      {esAdmin && <select style={{...inputStyle, width:'auto', marginBottom:0, padding:'6px'}} value={tiendaFiltro} onChange={e=>setTiendaFiltro(e.target.value)}><option value="TODAS">TODAS</option><option value="SPS">SPS</option><option value="Choluteca">Choluteca</option><option value="VA">VA</option></select>}
                     </div>
                 </div>
                 {tipoVista === 'mensual' && <select style={{...inputStyle, marginTop:'10px', marginBottom:0}} value={mesFiltro} onChange={e=>setMesFiltro(e.target.value)}>{MESES_SISTEMA.map(m=><option key={m} value={m}>{m}</option>)}</select>}
@@ -228,12 +242,34 @@ function App() {
                 </div>
                 <div style={{...card, marginTop:'15px'}}>
                     <h3 style={cardTitle}><History size={18}/> ÚLTIMOS GASTOS</h3>
-                    {historial.filter(h => (tiendaActiva === 'TODAS' || h.presupuestos?.responsable === tiendaActiva) && (tipoVista === 'anual' || h.presupuestos?.mes === mesFiltro)).slice(0,10).map(h => (
-                        <div key={h.id} style={historyItem}>
-                            <div style={{flex:1}}><div style={{fontWeight:700, fontSize:'12px'}}>{h.presupuestos?.linea_nombre}</div><div style={{fontSize:'10px', color:'#94a3b8'}}>{h.fecha} • {h.presupuestos?.responsable}</div></div>
-                            <div style={{textAlign:'right', display:'flex', alignItems:'center', gap:'10px'}}><div style={{color:'#dc2626', fontWeight:800, fontSize:'12px'}}>-L{h.monto_lps.toLocaleString()}</div><button onClick={() => window.open(supabase.storage.from('facturas').getPublicUrl(h.url_factura).data.publicUrl, '_blank')} style={eyeBtn}><Eye size={16}/></button></div>
-                        </div>
-                    ))}
+                    {historial.filter(h => (tiendaActiva === 'TODAS' || h.presupuestos?.responsable === tiendaActiva) && (tipoVista === 'anual' || h.presupuestos?.mes === mesFiltro)).slice(0,10).map(h => {
+                        const sobre = h.presupuestos?.sobregiro_monto || 0;
+                        return (
+                            <div key={h.id} style={historyItem}>
+                                <div style={{flex:1}}>
+                                    <div style={{fontWeight:700, fontSize:'12px'}}>{h.presupuestos?.linea_nombre}</div>
+                                    <div style={{fontSize:'10px', color:'#94a3b8'}}>{h.fecha} • {h.presupuestos?.responsable}</div>
+                                </div>
+                                <div style={{textAlign:'right', display:'flex', alignItems:'center', gap:'8px'}}>
+                                    <div style={{display:'flex', flexDirection:'column', alignItems:'flex-end'}}>
+                                        <div style={{color:'#dc2626', fontWeight:800, fontSize:'12px'}}>-L{h.monto_lps.toLocaleString()}</div>
+                                        {sobre > 0 && <div style={{fontSize:'8px', color:'#dc2626', fontWeight:700}}>Sobregirada por L{sobre.toLocaleString()}</div>}
+                                    </div>
+                                    <div style={{display:'flex', gap:'4px'}}>
+                                        {sobre > 0 && (
+                                            <button 
+                                                onClick={() => alert(`DETALLE DEL SOBREGIRO:\n\nFactura Total: L${h.monto_lps.toLocaleString()}\n- Cubierto este mes: L${(h.monto_lps - sobre).toLocaleString()}\n- Restado de ${h.presupuestos.sobregiro_mes_destino}: L${sobre.toLocaleString()}`)}
+                                                style={{...eyeBtn, color: COLOR_AZUL_CONTABLE, display:'flex', alignItems:'center', gap:'3px'}}
+                                            >
+                                                <AlertCircle size={14}/> <span style={{fontSize:'9px', fontWeight:800}}>Ver</span>
+                                            </button>
+                                        )}
+                                        <button onClick={() => window.open(supabase.storage.from('facturas').getPublicUrl(h.url_factura).data.publicUrl, '_blank')} style={eyeBtn}><Eye size={16}/></button>
+                                    </div>
+                                </div>
+                            </div>
+                        );
+                    })}
                 </div>
             </div>
         )}
@@ -249,16 +285,23 @@ function App() {
                 </div>
                 <div style={{...card, marginTop:'15px'}}>
                     <h3 style={cardTitle}><AlertTriangle size={18}/> DETALLE POR LÍNEA</h3>
-                    {stats.ranking
-                      .filter(linea => tipoVista === 'anual' || linea.inicial > 0) // <--- FILTRO AGREGADO AQUÍ
-                      .sort((a,b)=>(b.inicial-b.actual)-(a.inicial-a.actual)).slice(0, 20).map(linea => {
+                    {stats.ranking.filter(linea => tipoVista === 'anual' || linea.inicial > 0).sort((a,b)=>(b.inicial-b.actual)-(a.inicial-a.actual)).slice(0, 20).map(linea => {
                         const gastado = linea.inicial - linea.actual;
                         const porc = linea.inicial > 0 ? (gastado / linea.inicial) * 100 : 0;
+                        const tieneSobre = tipoVista === 'mensual' && (linea.sobregiro_acumulado || 0) > 0;
                         return (
-                            <div key={linea.nombre} style={{marginBottom:'15px'}}>
-                                <div style={{display:'flex', justifyContent:'space-between', marginBottom:'4px'}}><span style={{fontWeight:800, fontSize:'11px'}}>{linea.nombre.toUpperCase()}</span><span style={{color:'#dc2626', fontWeight:800, fontSize:'11px'}}>L{gastado.toLocaleString()}</span></div>
-                                <div style={{width:'100%', background:'#f1f5f9', height:'8px', borderRadius:'10px', overflow:'hidden'}}><div style={{height:'100%', background: porc > 90 ? '#dc2626' : COLOR_PIKHN, width: `${Math.min(porc, 100)}%`}}></div></div>
-                                <div style={{display:'flex', justifyContent:'space-between', fontSize:'9px', marginTop:'4px'}}><span>{porc.toFixed(1)}% Cumplimiento</span><span style={{color: COLOR_AZUL_CONTABLE}}>Saldo: L{linea.actual.toLocaleString()}</span></div>
+                            <div key={linea.nombre + linea.responsable} style={{marginBottom:'15px'}}>
+                                <div style={{display:'flex', justifyContent:'space-between', marginBottom:'4px', alignItems:'center'}}>
+                                    <span style={{fontWeight:800, fontSize:'11px'}}>{linea.nombre.toUpperCase()} {tiendaActiva === 'TODAS' && `(${linea.responsable})`}</span>
+                                    {tieneSobre && (
+                                      <div style={{display:'flex', alignItems:'center', gap:'5px'}}>
+                                        <span style={{fontSize:'8px', color:'#dc2626', fontWeight:900, background:'#fee2e2', padding:'2px 4px', borderRadius:'4px'}}>LÍNEA SOBREGIRADA</span>
+                                        <button onClick={() => alert(`SOBREGIRO EN ${mesFiltro}:\nL${linea.sobregiro_acumulado.toLocaleString()} restados de ${linea.sobregiro_mes_destino}`)} style={{border:'none', background:'none', color:COLOR_AZUL_CONTABLE, cursor:'pointer'}}><AlertCircle size={14}/></button>
+                                      </div>
+                                    )}
+                                </div>
+                                <div style={{width:'100%', background:'#f1f5f9', height:'8px', borderRadius:'10px', overflow:'hidden'}}><div style={{height:'100%', background: (porc > 90 || linea.actual < 0) ? '#dc2626' : COLOR_PIKHN, width: `${Math.min(porc, 100)}%`}}></div></div>
+                                <div style={{display:'flex', justifyContent:'space-between', fontSize:'9px', marginTop:'4px'}}><span>{porc.toFixed(0)}% Uso</span><span style={{color: COLOR_AZUL_CONTABLE}}>Saldo: L{linea.actual.toLocaleString()}</span></div>
                             </div>
                         );
                     })}
@@ -274,52 +317,38 @@ function App() {
                         <div key={cat.tipo} onClick={() => setTipoGastoFiltro(tipoGastoFiltro === cat.tipo ? null : cat.tipo)} style={{
                             background: tipoGastoFiltro === cat.tipo ? COLOR_PIKHN : 'white',
                             color: tipoGastoFiltro === cat.tipo ? 'white' : 'black',
-                            padding:'15px 5px', borderRadius:'15px', textAlign:'center', cursor:'pointer', border: '1px solid #eee', boxShadow:'0 2px 4px rgba(0,0,0,0.05)', transition:'all 0.2s'
+                            padding:'15px 5px', borderRadius:'15px', textAlign:'center', cursor:'pointer', border: '1px solid #eee', boxShadow:'0 2px 4px rgba(0,0,0,0.05)'
                         }}>
                             <div style={{fontSize:'8px', fontWeight:800, opacity:0.8}}>{cat.tipo.toUpperCase()}</div>
                             <div style={{fontSize:'11px', fontWeight:800, margin:'5px 0'}}>L{cat.gastado.toLocaleString()}</div>
-                            <div style={{fontSize:'9px', fontWeight:800, color: tipoGastoFiltro === cat.tipo ? COLOR_ACCENT : COLOR_AZUL_CONTABLE}}>
-                                {cat.inicial > 0 ? ((cat.gastado/cat.inicial)*100).toFixed(0) : 0}%
-                            </div>
                         </div>
                     ))}
                 </div>
-
-                {!tipoGastoFiltro ? (
-                    <div style={{...card, textAlign:'center', padding:'40px 20px', background:'#f8fafc', border:'2px dashed #cbd5e1'}}>
-                        <ListFilter size={32} color="#94a3b8" style={{margin:'0 auto 10px'}}/>
-                        <p style={{fontSize:'13px', fontWeight:700, color:'#64748b'}}>Seleccione una categoría arriba para desplegar el detalle</p>
-                    </div>
-                ) : (
+                {tipoGastoFiltro && (
                     <div style={card}>
                         <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'15px'}}>
-                            <h3 style={cardTitle}><ListFilter size={16}/> LÍNEAS: {tipoGastoFiltro.toUpperCase()}</h3>
-                            <button onClick={() => descargarDetalleExcel(tipoGastoFiltro)} style={{...eyeBtn, display:'flex', gap:'5px', alignItems:'center', background:COLOR_AZUL_CONTABLE, color:'white', padding:'5px 10px'}}>
-                                <Download size={14}/> <span style={{fontSize:'10px', fontWeight:800}}>EXCEL</span>
-                            </button>
+                            <h3 style={cardTitle}><ListFilter size={16}/> {tipoGastoFiltro.toUpperCase()}</h3>
+                            <button onClick={() => descargarDetalleExcel(tipoGastoFiltro)} style={{...eyeBtn, display:'flex', gap:'5px', background:COLOR_AZUL_CONTABLE, color:'white', padding:'5px 10px'}}><Download size={14}/> EXCEL</button>
                         </div>
-                        <div style={{overflowX:'auto'}}>
-                            <table style={{width:'100%', borderCollapse:'collapse', fontSize:'11px'}}>
-                                <thead>
-                                    <tr style={{borderBottom:'2px solid #f1f5f9', textAlign:'left'}}>
-                                        <th style={{padding:'10px 5px'}}>LÍNEA</th>
-                                        <th style={{padding:'10px 5px', textAlign:'right'}}>PRESP.</th>
-                                        <th style={{padding:'10px 5px', textAlign:'right'}}>GASTO</th>
-                                        <th style={{padding:'10px 5px', textAlign:'right'}}>SALDO</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {stats.ranking.filter(l => normalizar(l.tipo) === normalizar(tipoGastoFiltro)).map(l => (
-                                        <tr key={l.nombre} style={{borderBottom:'1px solid #f8fafc'}}>
-                                            <td style={{padding:'10px 5px', fontWeight:700}}>{l.nombre}</td>
-                                            <td style={{padding:'10px 5px', textAlign:'right'}}>L{l.inicial.toLocaleString()}</td>
-                                            <td style={{padding:'10px 5px', textAlign:'right', color:'#dc2626', fontWeight:700}}>L{(l.inicial-l.actual).toLocaleString()}</td>
-                                            <td style={{padding:'10px 5px', textAlign:'right', color:COLOR_AZUL_CONTABLE, fontWeight:700}}>L{l.actual.toLocaleString()}</td>
+                        <table style={{width:'100%', borderCollapse:'collapse', fontSize:'11px'}}>
+                            <thead><tr style={{borderBottom:'2px solid #f1f5f9', textAlign:'left'}}><th>LÍNEA</th><th style={{textAlign:'right'}}>GASTO</th><th style={{textAlign:'right'}}>SALDO</th></tr></thead>
+                            <tbody>
+                                {stats.ranking.filter(l => normalizar(l.tipo) === normalizar(tipoGastoFiltro)).map(l => {
+                                    const tieneSobre = tipoVista === 'mensual' && (l.sobregiro_acumulado || 0) > 0;
+                                    return (
+                                        <tr key={l.nombre + l.responsable} style={{borderBottom:'1px solid #f8fafc'}}>
+                                            <td style={{padding:'10px 0'}}>
+                                                <div style={{display:'flex', alignItems:'center', gap:'5px'}}>
+                                                    {l.nombre} {tieneSobre && <button onClick={() => alert(`Sobregiro de L${l.sobregiro_acumulado.toLocaleString()} detectado en este mes.`)} style={{border:'none', background:'none', color:'#dc2626'}}><AlertCircle size={12}/></button>}
+                                                </div>
+                                            </td>
+                                            <td style={{textAlign:'right', color:'#dc2626'}}>L{(l.inicial-l.actual).toLocaleString()}</td>
+                                            <td style={{textAlign:'right', color:COLOR_AZUL_CONTABLE}}>L{l.actual.toLocaleString()}</td>
                                         </tr>
-                                    ))}
-                                </tbody>
-                            </table>
-                        </div>
+                                    );
+                                })}
+                            </tbody>
+                        </table>
                     </div>
                 )}
             </div>
@@ -332,16 +361,15 @@ function App() {
                 <select style={inputStyle} value={compra.tiendaSeleccionada} onChange={e=>setCompra({...compra, tiendaSeleccionada:e.target.value, lineaId:''})}><option value="">Tienda...</option><option value="SPS">SPS</option><option value="Choluteca">Choluteca</option><option value="VA">VA</option><option value="Nacional">Nacional</option></select>
                 <select style={inputStyle} value={compra.lineaId} onChange={e=>setCompra({...compra, lineaId:e.target.value})} disabled={!compra.tiendaSeleccionada}>
                     <option value="">Línea...</option>
-                    {lineas.filter(l => l.responsable === compra.tiendaSeleccionada && l.mes === MESES_SISTEMA[new Date(compra.fecha + 'T12:00:00').getMonth()] && l.monto_actual > 0).map(l => {
-                        const saldoAcum = calcularSaldoParaSelect(l.linea_nombre, l.responsable, compra.fecha);
-                        return (
-                            <option key={l.id} value={l.id}>{l.linea_nombre} (Disponible: L{saldoAcum.toLocaleString()})</option>
-                        );
+                    {lineas.filter(l => l.responsable === compra.tiendaSeleccionada && l.mes === MESES_SISTEMA[new Date(compra.fecha + 'T12:00:00').getMonth()]).map(l => {
+                        const saldo = calcularSaldoParaSelect(l.linea_nombre, l.responsable, compra.fecha);
+                        const esEsp = normalizar(l.linea_nombre).includes("energia") || normalizar(l.linea_nombre).includes("internet");
+                        return <option key={l.id} value={l.id} disabled={saldo <= 0 && !esEsp}>{l.linea_nombre} ({saldo.toLocaleString()})</option>
                     })}
                 </select>
-                <input type="number" placeholder="Monto Lps" style={inputStyle} value={compra.monto} onChange={e=>setCompra({...compra, monto:e.target.value})} />
-                <input type="text" placeholder="Concepto / Factura" style={inputStyle} value={compra.desc} onChange={e=>setCompra({...compra, desc:e.target.value})} />
-                <label style={cameraBtn}><Camera size={18}/> {compra.foto ? "FACTURA LISTA ✅" : "ADJUNTAR FACTURA"} <input type="file" hidden onChange={e=>setCompra({...compra, foto:e.target.files[0]})} /></label>
+                <input type="number" placeholder="Monto" style={inputStyle} value={compra.monto} onChange={e=>setCompra({...compra, monto:e.target.value})} />
+                <input type="text" placeholder="Factura" style={inputStyle} value={compra.desc} onChange={e=>setCompra({...compra, desc:e.target.value})} />
+                <label style={cameraBtn}><Camera size={18}/> FOTO <input type="file" hidden onChange={e=>setCompra({...compra, foto:e.target.files[0]})} /></label>
                 <button onClick={registrarGasto} style={{...btn, background: COLOR_PIKHN}} disabled={loading}>{loading ? "PROCESANDO..." : "REGISTRAR"}</button>
             </div>
         )}
@@ -349,8 +377,8 @@ function App() {
         {seccion === 'config' && esAdmin && (
             <div style={card}>
                 <h3 style={cardTitle}><UploadCloud size={18}/> CARGAR PRESUPUESTO</h3>
-                <input type="file" accept=".xlsx, .xls" style={{margin:'20px 0', fontSize:'12px'}} onChange={e=>setArchivoExcel(e.target.files[0])} />
-                <button onClick={importarExcelPikHN} style={{...btn, background: COLOR_AZUL_CONTABLE}} disabled={loading}>Cargar presupuesto</button>
+                <input type="file" onChange={e=>setArchivoExcel(e.target.files[0])} style={{margin:'15px 0', fontSize:'12px'}} />
+                <button onClick={importarExcelPikHN} style={{...btn, background: COLOR_AZUL_CONTABLE}} disabled={loading}>{loading ? "CARGANDO..." : "CARGAR"}</button>
             </div>
         )}
       </main>
@@ -366,7 +394,7 @@ function App() {
   );
 }
 
-// Estilos
+// Estilos Respetados
 const appContainer = { minHeight:'100vh', background:'#f8fafc', paddingBottom:'110px', fontFamily:"'Plus Jakarta Sans', sans-serif" };
 const loginWrapper = { display:'flex', height:'100vh', alignItems:'center', justifyContent:'center', background: COLOR_PIKHN };
 const loginCard = { background:'white', padding:'40px', borderRadius:'30px', textAlign:'center', width:'320px' };
