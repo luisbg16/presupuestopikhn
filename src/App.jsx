@@ -3,7 +3,7 @@ import { createClient } from '@supabase/supabase-js';
 import * as XLSX from 'xlsx';
 import { 
   LayoutDashboard, Receipt, UploadCloud, History, 
-  Camera, LogOut, ShieldCheck, TrendingUp, AlertTriangle, Eye, FileSpreadsheet, BarChart3, ListFilter, Download, Info, AlertCircle, Search, Check, List, ToggleRight, ToggleLeft
+  Camera, LogOut, ShieldCheck, TrendingUp, AlertTriangle, Eye, FileSpreadsheet, BarChart3, ListFilter, Download, Info, AlertCircle, Search, Check, List, ToggleRight, ToggleLeft, Clock, XCircle
 } from 'lucide-react';
 
 const supabase = createClient(import.meta.env.VITE_SUPABASE_URL, import.meta.env.VITE_SUPABASE_ANON_KEY);
@@ -16,7 +16,8 @@ const COLOR_ACCENT = "#ffd100";
 const normalizar = (str) => str?.toString().normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim() || "";
 
 const ADMIN_EMAIL = "administracion@procoopsa.com";
-const CORES_ADMIN_EXTENDIDO = [ADMIN_EMAIL, "cavendano@chorotega.hn", "mrodriguez@chorotega.hn"];
+const SUPER_ADMINS = ["cavendano@chorotega.hn", "mrodriguez@chorotega.hn"];
+const CORES_ADMIN_EXTENDIDO = [ADMIN_EMAIL, ...SUPER_ADMINS, "pikhnsps@procoopsa.com", "pikhncholuteca@procoopsa.com", "pikhnva@procoopsa.com"];
 const HOY = new Date().toISOString().split('T')[0];
 
 function App() {
@@ -24,6 +25,7 @@ function App() {
   const [seccion, setSeccion] = useState('reportes');
   const [lineas, setLineas] = useState([]);
   const [historial, setHistorial] = useState([]);
+  const [solicitudes, setSolicitudes] = useState([]);
   const [tipoVista, setTipoVista] = useState('mensual');
   const [mesFiltro, setMesFiltro] = useState(MESES_SISTEMA[new Date().getMonth()]);
   const [tiendaFiltro, setTiendaFiltro] = useState('TODAS');
@@ -39,9 +41,12 @@ function App() {
 
   const [compra, setCompra] = useState({ tiendaSeleccionada: '', lineaId: '', monto: '', desc: '', foto: null, fecha: HOY });
 
-  const esAdmin = session?.user?.email && CORES_ADMIN_EXTENDIDO.includes(session.user.email.toLowerCase());
+  const userEmail = session?.user?.email?.toLowerCase();
+  const esAdmin = userEmail && [ADMIN_EMAIL, ...SUPER_ADMINS].includes(userEmail);
+  const esSuperAdmin = userEmail && SUPER_ADMINS.includes(userEmail);
+  
   const MAPA_ACCESOS = { [ADMIN_EMAIL]: "Nacional", "pikhnsps@procoopsa.com": "SPS", "pikhncholuteca@procoopsa.com": "Choluteca", "pikhnva@procoopsa.com": "VA" };
-  const tiendaActiva = esAdmin ? tiendaFiltro : (MAPA_ACCESOS[session?.user?.email.toLowerCase()] || 'Nacional');
+  const tiendaActiva = esAdmin ? tiendaFiltro : (MAPA_ACCESOS[userEmail] || 'Nacional');
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => setSession(session));
@@ -54,8 +59,10 @@ function App() {
   const obtenerDatos = async () => {
     const { data: p } = await supabase.from('presupuestos').select('*');
     const { data: c } = await supabase.from('compras').select('*, presupuestos(*)').order('fecha', { ascending: false });
+    const { data: s } = await supabase.from('solicitudes_sobregiro').select('*, presupuestos(*)').eq('estado', 'PENDIENTE');
     setLineas(p || []);
     setHistorial(c || []);
+    setSolicitudes(s || []);
   };
 
   const registrarGasto = async () => {
@@ -67,30 +74,46 @@ function App() {
     if (!lineaSel) return alert("Línea no encontrada");
 
     const esEspecial = normalizar(lineaSel.linea_nombre).includes("energia") || normalizar(lineaSel.linea_nombre).includes("internet");
-    
     const lineasAcumuladas = lineas.filter(l => l.linea_nombre === lineaSel.linea_nombre && l.responsable === lineaSel.responsable && MESES_SISTEMA.indexOf(l.mes) <= mesGastoIdx).sort((a, b) => MESES_SISTEMA.indexOf(a.mes) - MESES_SISTEMA.indexOf(b.mes));
     const disponibleMesActual = lineasAcumuladas.reduce((a, b) => a + b.monto_actual, 0);
 
+    // LÓGICA DE SOLICITUD DE AUTORIZACIÓN (SOLO SI NO ES LÍNEA ESPECIAL)
+    if (montoGasto > disponibleMesActual && !esEspecial) {
+      const confirmar = window.confirm(`Saldo insuficiente (Disponible: L${disponibleMesActual.toLocaleString()}).\n¿Desea enviar una solicitud de autorización al Super Admin?`);
+      if (!confirmar) return;
+
+      setLoading(true);
+      try {
+        const nombreFoto = `REQ_${Date.now()}.${compra.foto.name.split('.').pop()}`;
+        await supabase.storage.from('facturas').upload(nombreFoto, compra.foto);
+        await supabase.from('solicitudes_sobregiro').insert([{
+          presupuesto_id: lineaSel.id, monto_lps: montoGasto, descripcion: compra.desc,
+          fecha: compra.fecha, url_factura: nombreFoto, solicitado_por: userEmail, estado: 'PENDIENTE'
+        }]);
+        alert("⏳ Solicitud enviada con éxito. El gasto aparecerá en el historial una vez sea aprobado.");
+        setCompra({ ...compra, monto: '', desc: '', foto: null, lineaId: '' });
+        obtenerDatos();
+      } catch (e) { alert(e.message); } finally { setLoading(false); }
+      return;
+    }
+
+    // FLUJO DE PROCESAMIENTO INMEDIATO (CON SALDO O LÍNEA ESPECIAL)
+    procesarGastoFinal(lineaSel, montoGasto, mesGastoIdx, lineasAcumuladas, esEspecial, disponibleMesActual);
+  };
+
+  const procesarGastoFinal = async (lineaSel, montoGasto, mesGastoIdx, lineasAcumuladas, esEspecial, disponibleMesActual) => {
     const todasLasLineasAno = lineas.filter(l => l.linea_nombre === lineaSel.linea_nombre && l.responsable === lineaSel.responsable);
     const disponibleTotalAno = todasLasLineasAno.reduce((a, b) => a + b.monto_actual, 0);
 
     if (montoGasto > disponibleTotalAno) return alert("Gasto excede el presupuesto anual disponible.");
 
-    let requiereSobregiro = false;
-    let montoMesActual = montoGasto;
-    let montoAsobregirar = 0;
-    let mesDestino = "";
-    const refUnica = `REF-${Date.now()}`;
+    let requiereSobregiro = montoGasto > disponibleMesActual;
+    let montoMesActual = requiereSobregiro ? disponibleMesActual : montoGasto;
+    let montoAsobregirar = requiereSobregiro ? montoGasto - disponibleMesActual : 0;
+    let mesDestino = requiereSobregiro ? (mesGastoIdx + 1 < 12 ? MESES_SISTEMA[mesGastoIdx + 1] : "Sig. Periodo") : "";
 
-    if (montoGasto > disponibleMesActual) {
-        if (!esEspecial) return alert("Saldo insuficiente. Esta línea no permite sobregiros.");
-        requiereSobregiro = true;
-        montoMesActual = disponibleMesActual;
-        montoAsobregirar = montoGasto - disponibleMesActual;
-        const sigMesIdx = mesGastoIdx + 1;
-        mesDestino = sigMesIdx < 12 ? MESES_SISTEMA[sigMesIdx] : "Sig. Periodo";
-
-        const confirmar = window.confirm(`🚨 SOBREGIRO\nTotal Factura: L${montoGasto.toLocaleString()}\nSe cargarán L${montoAsobregirar.toLocaleString()} al mes de ${mesDestino}.`);
+    if (requiereSobregiro) {
+        const confirmar = window.confirm(`🚨 SOBREGIRO (Línea Especial)\nTotal Factura: L${montoGasto.toLocaleString()}\nSe cargarán L${montoAsobregirar.toLocaleString()} al mes de ${mesDestino}.`);
         if (!confirmar) return;
     }
 
@@ -99,6 +122,7 @@ function App() {
       const nombreFoto = `${Date.now()}.${compra.foto.name.split('.').pop()}`;
       await supabase.storage.from('facturas').upload(nombreFoto, compra.foto);
       
+      const refUnica = `REF-${Date.now()}`;
       let restante = montoMesActual;
       let distLog = `Factura total: L${montoGasto.toLocaleString()}. `;
 
@@ -111,8 +135,7 @@ function App() {
       }
       
       if (requiereSobregiro) {
-          const sigMesIdx = mesGastoIdx + 1;
-          const lSiguiente = lineas.find(l => l.linea_nombre === lineaSel.linea_nombre && l.responsable === lineaSel.responsable && MESES_SISTEMA.indexOf(l.mes) === sigMesIdx);
+          const lSiguiente = lineas.find(l => l.linea_nombre === lineaSel.linea_nombre && l.responsable === lineaSel.responsable && MESES_SISTEMA.indexOf(l.mes) === mesGastoIdx + 1);
           if (lSiguiente) {
               await supabase.from('presupuestos').update({ monto_actual: lSiguiente.monto_actual - montoAsobregirar }).eq('id', lSiguiente.id);
               await supabase.from('compras').insert([{ 
@@ -121,16 +144,68 @@ function App() {
               }]);
           }
           await supabase.from('presupuestos').update({ sobregiro_monto: montoAsobregirar, sobregiro_mes_destino: mesDestino }).eq('id', lineaSel.id);
-          distLog += `${mesDestino}: L${montoAsobregirar.toLocaleString()}.`;
       }
 
       await supabase.from('compras').insert([{ 
         presupuesto_id: lineaSel.id, monto_lps: montoMesActual, descripcion: `${compra.desc} | REF:${refUnica}`, 
-        fecha: compra.fecha, url_factura: nombreFoto, creado_por: session.user.email,
+        fecha: compra.fecha, url_factura: nombreFoto, creado_por: userEmail,
         es_sobregiro: requiereSobregiro, monto_excedente: montoAsobregirar, mes_excedente: mesDestino, dist_info: distLog
       }]);
 
       alert("✅ Gasto registrado"); setCompra({ ...compra, monto: '', desc: '', foto: null, lineaId: '' }); obtenerDatos();
+    } catch (e) { alert(e.message); } finally { setLoading(false); }
+  };
+
+  const gestionarSolicitud = async (sol, accion) => {
+    if (accion === 'RECHAZAR') {
+        if (!window.confirm("¿Rechazar esta solicitud definitivamente?")) return;
+        await supabase.from('solicitudes_sobregiro').update({ estado: 'RECHAZADO' }).eq('id', sol.id);
+        obtenerDatos();
+        return;
+    }
+
+    setLoading(true);
+    try {
+        const lineaSel = sol.presupuestos;
+        const fechaObj = new Date(sol.fecha + 'T12:00:00');
+        const mesGastoIdx = fechaObj.getMonth();
+        const lineasAcumuladas = lineas.filter(l => l.linea_nombre === lineaSel.linea_nombre && l.responsable === lineaSel.responsable && MESES_SISTEMA.indexOf(l.mes) <= mesGastoIdx).sort((a, b) => MESES_SISTEMA.indexOf(a.mes) - MESES_SISTEMA.indexOf(b.mes));
+        const disponibleMesActual = lineasAcumuladas.reduce((a, b) => a + b.monto_actual, 0);
+
+        let montoMesActual = disponibleMesActual;
+        let montoAsobregirar = sol.monto_lps - disponibleMesActual;
+        let mesDestino = mesGastoIdx + 1 < 12 ? MESES_SISTEMA[mesGastoIdx + 1] : "Sig. Periodo";
+        const refUnica = `APR-${sol.id}`;
+
+        let restante = montoMesActual;
+        let distLog = `AUTORIZADO POR SUPER ADMIN. `;
+
+        for (let l of lineasAcumuladas) {
+            if (restante <= 0) break;
+            let quitar = Math.min(l.monto_actual, restante);
+            await supabase.from('presupuestos').update({ monto_actual: l.monto_actual - quitar }).eq('id', l.id);
+            distLog += `${l.mes}: L${quitar.toLocaleString()}. `;
+            restante -= quitar;
+        }
+
+        const lSiguiente = lineas.find(l => l.linea_nombre === lineaSel.linea_nombre && l.responsable === lineaSel.responsable && MESES_SISTEMA.indexOf(l.mes) === mesGastoIdx + 1);
+        if (lSiguiente) {
+            await supabase.from('presupuestos').update({ monto_actual: lSiguiente.monto_actual - montoAsobregirar }).eq('id', lSiguiente.id);
+            await supabase.from('compras').insert([{ 
+                presupuesto_id: lSiguiente.id, monto_lps: montoAsobregirar, descripcion: `${sol.descripcion} | REF:${refUnica}`, 
+                fecha: sol.fecha, url_factura: sol.url_factura, creado_por: "SISTEMA", es_arrastre: true, dist_info: distLog + `${mesDestino}: L${montoAsobregirar.toLocaleString()}.`
+            }]);
+        }
+
+        await supabase.from('compras').insert([{ 
+            presupuesto_id: lineaSel.id, monto_lps: montoMesActual, descripcion: `${sol.descripcion} | REF:${refUnica}`, 
+            fecha: sol.fecha, url_factura: sol.url_factura, creado_por: sol.solicitado_por,
+            es_sobregiro: true, monto_excedente: montoAsobregirar, mes_excedente: mesDestino, dist_info: distLog
+        }]);
+        await supabase.from('solicitudes_sobregiro').update({ estado: 'APROBADO' }).eq('id', sol.id);
+        
+        alert("✅ Gasto autorizado y procesado.");
+        obtenerDatos();
     } catch (e) { alert(e.message); } finally { setLoading(false); }
   };
 
@@ -202,7 +277,7 @@ function App() {
     } else {
       const agrupado = {};
       base.forEach(h => {
-        const refMatch = h.descripcion?.match(/REF:(REF-\d+)/);
+        const refMatch = h.descripcion?.match(/REF:(REF-\d+|APR-\d+)/);
         const ref = refMatch ? refMatch[1] : `ID-${h.id}`;
         if (!agrupado[ref]) agrupado[ref] = { ...h, monto_lps: 0, mostrarInfoAnual: h.es_sobregiro || h.es_arrastre };
         agrupado[ref].monto_lps += h.monto_lps;
@@ -235,7 +310,7 @@ function App() {
       </header>
 
       <main style={mainStyle}>
-        {(seccion !== 'compras' && seccion !== 'config') && (
+        {(seccion !== 'compras' && seccion !== 'config' && seccion !== 'pendientes') && (
             <div style={card}>
                 <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', gap:'10px'}}>
                     <div style={toggleContainer}><button onClick={()=>setTipoVista('mensual')} style={tipoVista==='mensual'?toggleActive:toggleInactive}>MES</button><button onClick={()=>setTipoVista('anual')} style={tipoVista==='anual'?toggleActive:toggleInactive}>AÑO</button></div>
@@ -389,7 +464,34 @@ function App() {
             </div>
         )}
 
-        {seccion === 'compras' && esAdmin && (
+        {seccion === 'pendientes' && esSuperAdmin && (
+            <div style={{marginTop:'15px'}}>
+                <h3 style={cardTitle}><Clock size={18}/> SOLICITUDES EN STANDBY</h3>
+                {solicitudes.length === 0 ? (
+                    <div style={{...card, textAlign:'center', color:'#94a3b8', marginTop:'10px'}}>No hay solicitudes pendientes.</div>
+                ) : (
+                    solicitudes.map(sol => (
+                        <div key={sol.id} style={{...card, marginTop:'10px', borderLeft:`4px solid ${COLOR_ACCENT}`}}>
+                            <div style={{display:'flex', justifyContent:'space-between', alignItems:'flex-start'}}>
+                                <div>
+                                    <b style={{fontSize:'12px'}}>{sol.presupuestos?.linea_nombre} ({sol.presupuestos?.responsable})</b>
+                                    <div style={{fontSize:'10px', color:COLOR_PIKHN}}>{sol.descripcion}</div>
+                                    <div style={{fontSize:'9px', color:'#94a3b8'}}>{sol.solicitado_por} • {sol.fecha}</div>
+                                </div>
+                                <b style={{color:'#dc2626'}}>L{sol.monto_lps.toLocaleString()}</b>
+                            </div>
+                            <div style={{display:'flex', gap:'10px', marginTop:'15px'}}>
+                                <button onClick={()=>window.open(supabase.storage.from('facturas').getPublicUrl(sol.url_factura).data.publicUrl, '_blank')} style={{...eyeBtn, flex:1, height:'40px'}}><Eye size={16}/></button>
+                                <button onClick={()=>gestionarSolicitud(sol, 'RECHAZAR')} style={{...btn, background:'#fee2e2', color:'#dc2626', padding:'0 15px', height:'40px', flex:1}}><XCircle size={18}/></button>
+                                <button onClick={()=>gestionarSolicitud(sol, 'APROBAR')} style={{...btn, background:'#dcfce7', color:'#16a34a', height:'40px', flex:3}}>AUTORIZAR GASTO</button>
+                            </div>
+                        </div>
+                    ))
+                )}
+            </div>
+        )}
+
+        {seccion === 'compras' && (
             <div style={card}>
                 <h3 style={cardTitle}><Receipt size={18}/> REGISTRAR GASTO</h3>
                 <input type="date" style={inputStyle} value={compra.fecha} onChange={e=>setCompra({...compra, fecha:e.target.value, lineaId:''})} />
@@ -399,11 +501,10 @@ function App() {
                     {lineas?.length > 0 ? (
                       lineas.filter(l => l.responsable === compra.tiendaSeleccionada && l.mes === MESES_SISTEMA[new Date(compra.fecha + 'T12:00:00').getMonth()]).map(l => {
                         const saldo = calcularSaldoParaSelect(l.linea_nombre, l.responsable, compra.fecha);
-                        const esEsp = normalizar(l.linea_nombre).includes("energia") || normalizar(l.linea_nombre).includes("internet");
-                        return <option key={l.id} value={l.id} disabled={saldo <= 0 && !esEsp}>{l.linea_nombre} (L{saldo.toLocaleString()})</option>
+                        return <option key={l.id} value={l.id}>{l.linea_nombre} (L{saldo.toLocaleString()})</option>
                       })
                     ) : (
-                      <option disabled>Suba el presupuesto primero</option>
+                      <option disabled>Cargue el presupuesto primero</option>
                     )}
                 </select>
                 <input type="number" placeholder="Monto" style={inputStyle} value={compra.monto} onChange={e=>setCompra({...compra, monto:e.target.value})} />
@@ -423,8 +524,17 @@ function App() {
       </main>
 
       <nav style={navBar}>
-        {esAdmin && <button onClick={()=>setSeccion('compras')} style={seccion==='compras'?navBtnActive:navBtn}><Receipt size={24}/><span>Registrar</span></button>}
+        <button onClick={()=>setSeccion('compras')} style={seccion==='compras'?navBtnActive:navBtn}><Receipt size={24}/><span>Registrar</span></button>
         <button onClick={()=>setSeccion('reportes')} style={seccion==='reportes'?navBtnActive:navBtn}><LayoutDashboard size={24}/><span>Panel</span></button>
+        {esSuperAdmin && (
+            <button onClick={()=>setSeccion('pendientes')} style={seccion==='pendientes'?navBtnActive:navBtn}>
+                <div style={{position:'relative'}}>
+                    <Clock size={24}/>
+                    {solicitudes.length > 0 && <span style={notifBadge}>{solicitudes.length}</span>}
+                </div>
+                <span>Standby</span>
+            </button>
+        )}
         <button onClick={()=>setSeccion('ejecucion')} style={seccion==='ejecucion'?navBtnActive:navBtn}><TrendingUp size={24}/><span>Ejecución</span></button>
         {esAdmin && <button onClick={()=>setSeccion('analisis')} style={seccion==='analisis'?navBtnActive:navBtn}><BarChart3 size={24}/><span>Análisis</span></button>}
         {esAdmin && <button onClick={()=>setSeccion('config')} style={seccion==='config'?navBtnActive:navBtn}><UploadCloud size={24}/><span>Excel</span></button>}
@@ -433,7 +543,6 @@ function App() {
   );
 }
 
-// Estilos
 const appContainer = { minHeight:'100vh', background:'#f8fafc', paddingBottom:'110px', fontFamily:"'Plus Jakarta Sans', sans-serif" };
 const loginWrapper = { display:'flex', height:'100vh', alignItems:'center', justifyContent:'center', background: COLOR_PIKHN };
 const loginCard = { background:'white', padding:'40px', borderRadius:'30px', textAlign:'center', width:'320px' };
@@ -450,8 +559,8 @@ const cardTitle = { fontSize:'12px', fontWeight:800, display:'flex', alignItems:
 const toggleContainer = { display:'flex', background:'#f1f5f9', borderRadius:'10px', padding:'3px' };
 const toggleActive = { border:'none', background:'white', padding:'6px 12px', borderRadius:'8px', fontSize:'10px', fontWeight:800, color:COLOR_PIKHN };
 const toggleInactive = { border:'none', background:'none', padding:'6px 12px', color:'#94a3b8', fontSize:'10px' };
-const navBar = { position:'fixed', bottom:0, width:'100%', background:'white', display:'flex', borderTop:'1px solid #f1f5f9', height:'85px', left:0, justifyContent:'space-around' };
-const navBtn = { border:'none', background:'none', display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', color:'#94a3b8', fontSize:'9px', fontWeight:700, gap:'4px' };
+const navBar = { position:'fixed', bottom:0, width:'100%', background:'white', display:'flex', borderTop:'1px solid #f1f5f9', height:'85px', left:0, justifyContent:'space-around', zIndex:100 };
+const navBtn = { border:'none', background:'none', display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', color:'#94a3b8', fontSize:'9px', fontWeight:700, gap:'4px', flex:1 };
 const navBtnActive = { ...navBtn, color: COLOR_PIKHN };
 const historyItem = { padding:'12px 0', borderBottom:'1px solid #f8fafc', display:'flex', justifyContent:'space-between', alignItems:'center' };
 const logoutBtn = { background:'rgba(255,255,255,0.1)', border:'none', color:'white', padding:'6px', borderRadius:'8px' };
@@ -460,5 +569,6 @@ const consolidateBtn = { background:'none', border:'none', display:'flex', align
 const badgeBase = { fontSize:'8px', fontWeight:900, padding:'2px 6px', borderRadius:'4px' };
 const badgeSobre = { ...badgeBase, background: '#fee2e2', color: '#dc2626' };
 const badgeArrastre = { ...badgeBase, background: '#e0f2fe', color: '#0284c7' };
+const notifBadge = { position:'absolute', top:'-5px', right:'-8px', background:'#dc2626', color:'white', fontSize:'8px', padding:'2px 5px', borderRadius:'10px', fontWeight:800, border:'2px solid white' };
 
 export default App;
