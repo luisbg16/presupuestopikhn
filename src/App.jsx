@@ -126,12 +126,13 @@ function App() {
       await supabase.storage.from('facturas').upload(nombreFoto, compra.foto);
 
       const refUnica = `REF-${Date.now()}`;
+      const mesActualNombre = MESES_SISTEMA[mesGastoIdx];
+
+      // ── Calcular cuánto sale de cada mes ──────────────────────────────────
       let restante = montoADescontar;
       let distLog = `Factura total: L${montoGasto.toLocaleString()}. `;
-      const mesActualNombre = MESES_SISTEMA[mesGastoIdx];
       const descuentosPorMes = [];
 
-      // lineasAcumuladas ya viene de más reciente a más antiguo
       for (let l of lineasAcumuladas) {
         if (restante <= 0) break;
         let quitar = Math.min(l.monto_actual, restante);
@@ -142,16 +143,24 @@ function App() {
         }
       }
 
-      // ¿Se usó saldo de algún mes anterior?
-      const usaSaldoAnterior = descuentosPorMes.some(d => d.esMesAnterior);
+      // Cuánto salió SOLO del mes actual vs de meses anteriores
+      const montoDeMesActual = descuentosPorMes.filter(d => !d.esMesAnterior).reduce((a, b) => a + b.quitar, 0);
+      const montoDeMesesAnteriores = descuentosPorMes.filter(d => d.esMesAnterior).reduce((a, b) => a + b.quitar, 0);
+      const usaSaldoAnterior = montoDeMesesAnteriores > 0;
 
-      // Aplicar descuentos en presupuestos
+      // Resumen legible de qué meses anteriores aportaron
+      const resumenAnteriores = descuentosPorMes
+        .filter(d => d.esMesAnterior)
+        .map(d => `${d.linea.mes}: L${d.quitar.toLocaleString()}`)
+        .join(', ');
+
+      // ── Aplicar descuentos en presupuestos ────────────────────────────────
       for (let d of descuentosPorMes) {
         await supabase.from('presupuestos').update({ monto_actual: d.linea.monto_actual - d.quitar }).eq('id', d.linea.id);
       }
 
-      // Crear registro de "cargo externo" en cada mes anterior tocado
-      // Así en Enero se verá que su saldo fue usado en una factura de Marzo
+      // ── Registros de "Cargo externo" en meses anteriores tocados ──────────
+      // Aparecen en el historial de Enero/Febrero para que cuadren los números
       for (let d of descuentosPorMes.filter(d => d.esMesAnterior)) {
         await supabase.from('compras').insert([{
           presupuesto_id: d.linea.id,
@@ -165,7 +174,7 @@ function App() {
         }]);
       }
 
-      // Sobregiro al mes siguiente (líneas especiales)
+      // ── Sobregiro al mes siguiente (líneas especiales) ────────────────────
       if (requiereSobregiro) {
         const lSiguiente = lineas.find(l => l.linea_nombre === lineaSel.linea_nombre && l.responsable === lineaSel.responsable && MESES_SISTEMA.indexOf(l.mes) === mesGastoIdx + 1);
         if (lSiguiente) {
@@ -181,10 +190,13 @@ function App() {
         await supabase.from('presupuestos').update({ sobregiro_monto: montoAsobregirar, sobregiro_mes_destino: mesDestino }).eq('id', lineaSel.id);
       }
 
-      // Registro principal en el mes actual
+      // ── Registro principal en el mes actual ───────────────────────────────
+      // monto_lps = solo lo que salió del mes actual
+      // monto_saldo_anterior = lo que se tomó de meses anteriores
+      // El total real de la factura = monto_lps + monto_saldo_anterior
       await supabase.from('compras').insert([{
         presupuesto_id: lineaSel.id,
-        monto_lps: montoADescontar,
+        monto_lps: montoDeMesActual,                    // ← solo lo del mes actual
         descripcion: `${compra.desc} | REF:${refUnica}`,
         fecha: compra.fecha,
         url_factura: nombreFoto,
@@ -193,7 +205,9 @@ function App() {
         monto_excedente: montoAsobregirar,
         mes_excedente: mesDestino,
         dist_info: distLog,
-        usa_saldo_anterior: usaSaldoAnterior   // ← NUEVO FLAG
+        usa_saldo_anterior: usaSaldoAnterior,
+        monto_saldo_anterior: montoDeMesesAnteriores,   // ← nuevo campo
+        detalle_saldo_anterior: resumenAnteriores       // ← nuevo campo: "Ene: L500, Feb: L200"
       }]);
 
       alert("✅ Gasto registrado");
@@ -217,7 +231,6 @@ function App() {
       const mesGastoIdx = fechaObj.getMonth();
       const mesActualNombre = MESES_SISTEMA[mesGastoIdx];
 
-      // Más reciente primero
       const lineasAcumuladas = lineas
         .filter(l => l.linea_nombre === lineaSel.linea_nombre && l.responsable === lineaSel.responsable && MESES_SISTEMA.indexOf(l.mes) <= mesGastoIdx)
         .sort((a, b) => MESES_SISTEMA.indexOf(b.mes) - MESES_SISTEMA.indexOf(a.mes));
@@ -242,13 +255,18 @@ function App() {
         }
       }
 
-      const usaSaldoAnterior = descuentosPorMes.some(d => d.esMesAnterior);
+      const montoDeMesActual = descuentosPorMes.filter(d => !d.esMesAnterior).reduce((a, b) => a + b.quitar, 0);
+      const montoDeMesesAnteriores = descuentosPorMes.filter(d => d.esMesAnterior).reduce((a, b) => a + b.quitar, 0);
+      const usaSaldoAnterior = montoDeMesesAnteriores > 0;
+      const resumenAnteriores = descuentosPorMes
+        .filter(d => d.esMesAnterior)
+        .map(d => `${d.linea.mes}: L${d.quitar.toLocaleString()}`)
+        .join(', ');
 
       for (let d of descuentosPorMes) {
         await supabase.from('presupuestos').update({ monto_actual: d.linea.monto_actual - d.quitar }).eq('id', d.linea.id);
       }
 
-      // Registros de cargo externo en meses anteriores tocados
       for (let d of descuentosPorMes.filter(d => d.esMesAnterior)) {
         await supabase.from('compras').insert([{
           presupuesto_id: d.linea.id,
@@ -262,7 +280,6 @@ function App() {
         }]);
       }
 
-      // Sobregiro al mes siguiente
       const lSiguiente = lineas.find(l => l.linea_nombre === lineaSel.linea_nombre && l.responsable === lineaSel.responsable && MESES_SISTEMA.indexOf(l.mes) === mesGastoIdx + 1);
       if (lSiguiente) {
         await supabase.from('presupuestos').update({ monto_actual: lSiguiente.monto_actual - montoAsobregirar }).eq('id', lSiguiente.id);
@@ -277,7 +294,7 @@ function App() {
 
       await supabase.from('compras').insert([{
         presupuesto_id: lineaSel.id,
-        monto_lps: montoADescontar,
+        monto_lps: montoDeMesActual,
         descripcion: `${sol.descripcion} | REF:${refUnica}`,
         fecha: sol.fecha,
         url_factura: sol.url_factura,
@@ -286,7 +303,9 @@ function App() {
         monto_excedente: montoAsobregirar,
         mes_excedente: mesDestino,
         dist_info: distLog,
-        usa_saldo_anterior: usaSaldoAnterior   // ← NUEVO FLAG
+        usa_saldo_anterior: usaSaldoAnterior,
+        monto_saldo_anterior: montoDeMesesAnteriores,
+        detalle_saldo_anterior: resumenAnteriores
       }]);
 
       await supabase.from('solicitudes_sobregiro').update({ estado: 'APROBADO' }).eq('id', sol.id);
@@ -449,8 +468,11 @@ function App() {
                     ? (h.es_sobregiro || h.es_arrastre || h.usa_saldo_anterior)
                     : h.mostrarInfoAnual;
 
-                  // Detectar si es un "cargo externo": saldo de este mes usado en factura de mes posterior
+                  // Cargo externo: saldo de este mes usado en factura de mes posterior
                   const esCargoExterno = h.es_arrastre && h.descripcion?.startsWith('Cargo desde');
+
+                  // Total real de la factura (mes actual + meses anteriores)
+                  const totalFactura = (h.monto_lps || 0) + (h.monto_saldo_anterior || 0);
 
                   return (
                     <div key={h.id} style={historyItem}>
@@ -460,26 +482,59 @@ function App() {
                             {h.presupuestos?.linea_nombre}
                             {tiendaActiva === 'TODAS' && <span style={{fontSize:'8px', color:'#94a3b8'}}> ({h.presupuestos?.responsable})</span>}
                           </div>
-                          {/* Factura con sobregiro al mes siguiente */}
+                          {/* Sobregiro al mes siguiente */}
                           {h.es_sobregiro && tipoVista === 'mensual' && <span style={badgeSobre}>Sobregiro</span>}
-                          {/* Arrastre normal (cargo al mes siguiente por sobregiro especial) */}
+                          {/* Arrastre normal al mes siguiente */}
                           {h.es_arrastre && !esCargoExterno && tipoVista === 'mensual' && <span style={badgeArrastre}>Arrastre →</span>}
-                          {/* Cargo externo: dinero de este mes usado en factura de un mes posterior */}
+                          {/* Cargo externo: este mes cedió saldo a una factura de mes posterior */}
                           {esCargoExterno && tipoVista === 'mensual' && <span style={badgeCargoExterno}>← Cargo ext.</span>}
-                          {/* Factura que consumió saldo de meses anteriores */}
-                          {h.usa_saldo_anterior && tipoVista === 'mensual' && <span style={badgeSaldoAnterior}>↑ Saldo ant.</span>}
+                          {/* Factura que usó saldo de meses anteriores */}
+                          {h.usa_saldo_anterior && tipoVista === 'mensual' && <span style={badgeSaldoAnterior}>↑ Meses ant.</span>}
                         </div>
                         <div style={{fontSize:'10px', color:COLOR_PIKHN, fontWeight:600}}>{descLimpia}</div>
                         <div style={{fontSize:'8px', color:'#94a3b8'}}>{h.fecha}</div>
                       </div>
+
                       <div style={{textAlign:'right', display:'flex', alignItems:'center', gap:'8px'}}>
                         <div style={{display:'flex', flexDirection:'column', alignItems:'flex-end'}}>
-                          <b style={{color: '#dc2626', fontWeight:800, fontSize:'12px'}}>-L{h.monto_lps.toLocaleString()}</b>
-                          {h.es_sobregiro && tipoVista === 'mensual' && <div style={{fontSize:'7px', color:'#dc2626', fontWeight:700}}>+ L{h.monto_excedente?.toLocaleString()} en {h.mes_excedente}</div>}
+
+                          {/* Monto principal: solo lo del mes actual */}
+                          <b style={{color: '#dc2626', fontWeight:800, fontSize:'12px'}}>
+                            -L{h.monto_lps.toLocaleString()}
+                          </b>
+
+                          {/* Notita de saldo tomado de meses anteriores */}
+                          {h.usa_saldo_anterior && (h.monto_saldo_anterior || 0) > 0 && tipoVista === 'mensual' && (
+                            <div style={{fontSize:'7px', color:'#7c3aed', fontWeight:700}}>
+                              +L{h.monto_saldo_anterior.toLocaleString()} de meses ant.
+                            </div>
+                          )}
+
+                          {/* Notita de total real de la factura */}
+                          {h.usa_saldo_anterior && (h.monto_saldo_anterior || 0) > 0 && tipoVista === 'mensual' && (
+                            <div style={{fontSize:'7px', color:'#64748b', fontWeight:600}}>
+                              Total factura: L{totalFactura.toLocaleString()}
+                            </div>
+                          )}
+
+                          {/* Notita de sobregiro al mes siguiente */}
+                          {h.es_sobregiro && tipoVista === 'mensual' && (
+                            <div style={{fontSize:'7px', color:'#dc2626', fontWeight:700}}>
+                              +L{h.monto_excedente?.toLocaleString()} en {h.mes_excedente}
+                            </div>
+                          )}
                         </div>
+
                         <div style={{display:'flex', gap:'4px'}}>
                           {mostrarInfo && (
-                            <button onClick={() => alert(`DETALLE:\n${h.dist_info?.replace(/\. /g, '\n') || 'Info no disponible'}`)} style={eyeBtn}>
+                            <button onClick={() => {
+                              let detalle = '';
+                              if (h.usa_saldo_anterior && h.detalle_saldo_anterior) {
+                                detalle += `📋 SALDO DE MESES ANTERIORES:\n${h.detalle_saldo_anterior}\n\n`;
+                              }
+                              detalle += `📊 DISTRIBUCIÓN COMPLETA:\n${h.dist_info?.replace(/\. /g, '\n') || 'Info no disponible'}`;
+                              alert(detalle);
+                            }} style={eyeBtn}>
                               <List size={14} color={COLOR_AZUL_CONTABLE}/>
                             </button>
                           )}
@@ -700,10 +755,10 @@ const logoutBtn = { background:'rgba(255,255,255,0.1)', border:'none', color:'wh
 const eyeBtn = { background:'#f1f5f9', border:'none', padding:'6px', borderRadius:'6px', cursor:'pointer' };
 const consolidateBtn = { background:'none', border:'none', display:'flex', alignItems:'center', gap:'4px', cursor:'pointer' };
 const badgeBase = { fontSize:'8px', fontWeight:900, padding:'2px 6px', borderRadius:'4px' };
-const badgeSobre      = { ...badgeBase, background: '#fee2e2', color: '#dc2626' };           // Rojo  — sobregiro al mes siguiente
-const badgeArrastre   = { ...badgeBase, background: '#e0f2fe', color: '#0284c7' };           // Azul  — arrastre al mes siguiente
-const badgeCargoExterno = { ...badgeBase, background: '#fef9c3', color: '#b45309' };         // Amarillo — este mes cedió saldo a una factura de un mes posterior
-const badgeSaldoAnterior = { ...badgeBase, background: '#f3e8ff', color: '#7c3aed' };        // Violeta — esta factura usó saldo de meses anteriores
+const badgeSobre        = { ...badgeBase, background: '#fee2e2', color: '#dc2626' };    // Rojo    — sobregiro al mes siguiente
+const badgeArrastre     = { ...badgeBase, background: '#e0f2fe', color: '#0284c7' };    // Azul    — arrastre al mes siguiente
+const badgeCargoExterno = { ...badgeBase, background: '#fef9c3', color: '#b45309' };    // Amarillo — este mes cedió saldo a factura de mes posterior
+const badgeSaldoAnterior = { ...badgeBase, background: '#f3e8ff', color: '#7c3aed' };   // Violeta — esta factura usó saldo de meses anteriores
 const notifBadge = { position:'absolute', top:'-5px', right:'-8px', background:'#dc2626', color:'white', fontSize:'8px', padding:'2px 5px', borderRadius:'10px', fontWeight:800, border:'2px solid white' };
 
 export default App;
