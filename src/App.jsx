@@ -74,14 +74,18 @@ function App() {
     if (!lineaSel) return alert("Línea no encontrada");
 
     const esEspecial = normalizar(lineaSel.linea_nombre).includes("energia") || normalizar(lineaSel.linea_nombre).includes("internet");
-    const lineasAcumuladas = lineas.filter(l => l.linea_nombre === lineaSel.linea_nombre && l.responsable === lineaSel.responsable && MESES_SISTEMA.indexOf(l.mes) <= mesGastoIdx).sort((a, b) => MESES_SISTEMA.indexOf(a.mes) - MESES_SISTEMA.indexOf(b.mes));
-    const disponibleMesActual = lineasAcumuladas.reduce((a, b) => a + b.monto_actual, 0);
+
+    // Ordenado de más reciente a más antiguo: primero consume mes actual, luego anteriores
+    const lineasAcumuladas = lineas
+      .filter(l => l.linea_nombre === lineaSel.linea_nombre && l.responsable === lineaSel.responsable && MESES_SISTEMA.indexOf(l.mes) <= mesGastoIdx)
+      .sort((a, b) => MESES_SISTEMA.indexOf(b.mes) - MESES_SISTEMA.indexOf(a.mes));
+
+    const disponibleAcumulado = lineasAcumuladas.reduce((a, b) => a + b.monto_actual, 0);
 
     // LÓGICA DE SOLICITUD DE AUTORIZACIÓN (SOLO SI NO ES LÍNEA ESPECIAL)
-    if (montoGasto > disponibleMesActual && !esEspecial) {
-      const confirmar = window.confirm(`Saldo insuficiente (Disponible: L${disponibleMesActual.toLocaleString()}).\n¿Desea enviar una solicitud de autorización al Super Admin?`);
+    if (montoGasto > disponibleAcumulado && !esEspecial) {
+      const confirmar = window.confirm(`Saldo insuficiente (Disponible acumulado: L${disponibleAcumulado.toLocaleString()}).\n¿Desea enviar una solicitud de autorización al Super Admin?`);
       if (!confirmar) return;
-
       setLoading(true);
       try {
         const nombreFoto = `REQ_${Date.now()}.${compra.foto.name.split('.').pop()}`;
@@ -97,115 +101,197 @@ function App() {
       return;
     }
 
-    // FLUJO DE PROCESAMIENTO INMEDIATO (CON SALDO O LÍNEA ESPECIAL)
-    procesarGastoFinal(lineaSel, montoGasto, mesGastoIdx, lineasAcumuladas, esEspecial, disponibleMesActual);
+    procesarGastoFinal(lineaSel, montoGasto, mesGastoIdx, lineasAcumuladas, esEspecial, disponibleAcumulado);
   };
 
-  const procesarGastoFinal = async (lineaSel, montoGasto, mesGastoIdx, lineasAcumuladas, esEspecial, disponibleMesActual) => {
+  const procesarGastoFinal = async (lineaSel, montoGasto, mesGastoIdx, lineasAcumuladas, esEspecial, disponibleAcumulado) => {
     const todasLasLineasAno = lineas.filter(l => l.linea_nombre === lineaSel.linea_nombre && l.responsable === lineaSel.responsable);
     const disponibleTotalAno = todasLasLineasAno.reduce((a, b) => a + b.monto_actual, 0);
 
     if (montoGasto > disponibleTotalAno) return alert("Gasto excede el presupuesto anual disponible.");
 
-    let requiereSobregiro = montoGasto > disponibleMesActual;
-    let montoMesActual = requiereSobregiro ? disponibleMesActual : montoGasto;
-    let montoAsobregirar = requiereSobregiro ? montoGasto - disponibleMesActual : 0;
+    let requiereSobregiro = montoGasto > disponibleAcumulado;
+    let montoADescontar = requiereSobregiro ? disponibleAcumulado : montoGasto;
+    let montoAsobregirar = requiereSobregiro ? montoGasto - disponibleAcumulado : 0;
     let mesDestino = requiereSobregiro ? (mesGastoIdx + 1 < 12 ? MESES_SISTEMA[mesGastoIdx + 1] : "Sig. Periodo") : "";
 
     if (requiereSobregiro) {
-        const confirmar = window.confirm(`🚨 SOBREGIRO (Línea Especial)\nTotal Factura: L${montoGasto.toLocaleString()}\nSe cargarán L${montoAsobregirar.toLocaleString()} al mes de ${mesDestino}.`);
-        if (!confirmar) return;
+      const confirmar = window.confirm(`🚨 SOBREGIRO (Línea Especial)\nTotal Factura: L${montoGasto.toLocaleString()}\nSe cargarán L${montoAsobregirar.toLocaleString()} al mes de ${mesDestino}.`);
+      if (!confirmar) return;
     }
 
     setLoading(true);
     try {
       const nombreFoto = `${Date.now()}.${compra.foto.name.split('.').pop()}`;
       await supabase.storage.from('facturas').upload(nombreFoto, compra.foto);
-      
-      const refUnica = `REF-${Date.now()}`;
-      let restante = montoMesActual;
-      let distLog = `Factura total: L${montoGasto.toLocaleString()}. `;
 
+      const refUnica = `REF-${Date.now()}`;
+      let restante = montoADescontar;
+      let distLog = `Factura total: L${montoGasto.toLocaleString()}. `;
+      const mesActualNombre = MESES_SISTEMA[mesGastoIdx];
+      const descuentosPorMes = [];
+
+      // lineasAcumuladas ya viene de más reciente a más antiguo
       for (let l of lineasAcumuladas) {
         if (restante <= 0) break;
         let quitar = Math.min(l.monto_actual, restante);
-        await supabase.from('presupuestos').update({ monto_actual: l.monto_actual - quitar }).eq('id', l.id);
-        distLog += `${l.mes}: L${quitar.toLocaleString()}. `;
-        restante -= quitar;
-      }
-      
-      if (requiereSobregiro) {
-          const lSiguiente = lineas.find(l => l.linea_nombre === lineaSel.linea_nombre && l.responsable === lineaSel.responsable && MESES_SISTEMA.indexOf(l.mes) === mesGastoIdx + 1);
-          if (lSiguiente) {
-              await supabase.from('presupuestos').update({ monto_actual: lSiguiente.monto_actual - montoAsobregirar }).eq('id', lSiguiente.id);
-              await supabase.from('compras').insert([{ 
-                presupuesto_id: lSiguiente.id, monto_lps: montoAsobregirar, descripcion: `${compra.desc} | REF:${refUnica}`, 
-                fecha: compra.fecha, url_factura: nombreFoto, creado_por: "SISTEMA", es_arrastre: true, dist_info: distLog + `${mesDestino}: L${montoAsobregirar.toLocaleString()}.`
-              }]);
-          }
-          await supabase.from('presupuestos').update({ sobregiro_monto: montoAsobregirar, sobregiro_mes_destino: mesDestino }).eq('id', lineaSel.id);
+        if (quitar > 0) {
+          descuentosPorMes.push({ linea: l, quitar, esMesAnterior: l.mes !== mesActualNombre });
+          distLog += `${l.mes}: L${quitar.toLocaleString()}. `;
+          restante -= quitar;
+        }
       }
 
-      await supabase.from('compras').insert([{ 
-        presupuesto_id: lineaSel.id, monto_lps: montoMesActual, descripcion: `${compra.desc} | REF:${refUnica}`, 
-        fecha: compra.fecha, url_factura: nombreFoto, creado_por: userEmail,
-        es_sobregiro: requiereSobregiro, monto_excedente: montoAsobregirar, mes_excedente: mesDestino, dist_info: distLog
+      // ¿Se usó saldo de algún mes anterior?
+      const usaSaldoAnterior = descuentosPorMes.some(d => d.esMesAnterior);
+
+      // Aplicar descuentos en presupuestos
+      for (let d of descuentosPorMes) {
+        await supabase.from('presupuestos').update({ monto_actual: d.linea.monto_actual - d.quitar }).eq('id', d.linea.id);
+      }
+
+      // Crear registro de "cargo externo" en cada mes anterior tocado
+      // Así en Enero se verá que su saldo fue usado en una factura de Marzo
+      for (let d of descuentosPorMes.filter(d => d.esMesAnterior)) {
+        await supabase.from('compras').insert([{
+          presupuesto_id: d.linea.id,
+          monto_lps: d.quitar,
+          descripcion: `Cargo desde ${mesActualNombre} (${compra.desc}) | REF:${refUnica}`,
+          fecha: compra.fecha,
+          url_factura: nombreFoto,
+          creado_por: "SISTEMA",
+          es_arrastre: true,
+          dist_info: `Saldo de ${d.linea.mes} utilizado en factura registrada en ${mesActualNombre}. Total factura: L${montoGasto.toLocaleString()}.`
+        }]);
+      }
+
+      // Sobregiro al mes siguiente (líneas especiales)
+      if (requiereSobregiro) {
+        const lSiguiente = lineas.find(l => l.linea_nombre === lineaSel.linea_nombre && l.responsable === lineaSel.responsable && MESES_SISTEMA.indexOf(l.mes) === mesGastoIdx + 1);
+        if (lSiguiente) {
+          await supabase.from('presupuestos').update({ monto_actual: lSiguiente.monto_actual - montoAsobregirar }).eq('id', lSiguiente.id);
+          await supabase.from('compras').insert([{
+            presupuesto_id: lSiguiente.id, monto_lps: montoAsobregirar,
+            descripcion: `${compra.desc} | REF:${refUnica}`,
+            fecha: compra.fecha, url_factura: nombreFoto, creado_por: "SISTEMA",
+            es_arrastre: true,
+            dist_info: distLog + `${mesDestino}: L${montoAsobregirar.toLocaleString()}.`
+          }]);
+        }
+        await supabase.from('presupuestos').update({ sobregiro_monto: montoAsobregirar, sobregiro_mes_destino: mesDestino }).eq('id', lineaSel.id);
+      }
+
+      // Registro principal en el mes actual
+      await supabase.from('compras').insert([{
+        presupuesto_id: lineaSel.id,
+        monto_lps: montoADescontar,
+        descripcion: `${compra.desc} | REF:${refUnica}`,
+        fecha: compra.fecha,
+        url_factura: nombreFoto,
+        creado_por: userEmail,
+        es_sobregiro: requiereSobregiro,
+        monto_excedente: montoAsobregirar,
+        mes_excedente: mesDestino,
+        dist_info: distLog,
+        usa_saldo_anterior: usaSaldoAnterior   // ← NUEVO FLAG
       }]);
 
-      alert("✅ Gasto registrado"); setCompra({ ...compra, monto: '', desc: '', foto: null, lineaId: '' }); obtenerDatos();
+      alert("✅ Gasto registrado");
+      setCompra({ ...compra, monto: '', desc: '', foto: null, lineaId: '' });
+      obtenerDatos();
     } catch (e) { alert(e.message); } finally { setLoading(false); }
   };
 
   const gestionarSolicitud = async (sol, accion) => {
     if (accion === 'RECHAZAR') {
-        if (!window.confirm("¿Rechazar esta solicitud definitivamente?")) return;
-        await supabase.from('solicitudes_sobregiro').update({ estado: 'RECHAZADO' }).eq('id', sol.id);
-        obtenerDatos();
-        return;
+      if (!window.confirm("¿Rechazar esta solicitud definitivamente?")) return;
+      await supabase.from('solicitudes_sobregiro').update({ estado: 'RECHAZADO' }).eq('id', sol.id);
+      obtenerDatos();
+      return;
     }
 
     setLoading(true);
     try {
-        const lineaSel = sol.presupuestos;
-        const fechaObj = new Date(sol.fecha + 'T12:00:00');
-        const mesGastoIdx = fechaObj.getMonth();
-        const lineasAcumuladas = lineas.filter(l => l.linea_nombre === lineaSel.linea_nombre && l.responsable === lineaSel.responsable && MESES_SISTEMA.indexOf(l.mes) <= mesGastoIdx).sort((a, b) => MESES_SISTEMA.indexOf(a.mes) - MESES_SISTEMA.indexOf(b.mes));
-        const disponibleMesActual = lineasAcumuladas.reduce((a, b) => a + b.monto_actual, 0);
+      const lineaSel = sol.presupuestos;
+      const fechaObj = new Date(sol.fecha + 'T12:00:00');
+      const mesGastoIdx = fechaObj.getMonth();
+      const mesActualNombre = MESES_SISTEMA[mesGastoIdx];
 
-        let montoMesActual = disponibleMesActual;
-        let montoAsobregirar = sol.monto_lps - disponibleMesActual;
-        let mesDestino = mesGastoIdx + 1 < 12 ? MESES_SISTEMA[mesGastoIdx + 1] : "Sig. Periodo";
-        const refUnica = `APR-${sol.id}`;
+      // Más reciente primero
+      const lineasAcumuladas = lineas
+        .filter(l => l.linea_nombre === lineaSel.linea_nombre && l.responsable === lineaSel.responsable && MESES_SISTEMA.indexOf(l.mes) <= mesGastoIdx)
+        .sort((a, b) => MESES_SISTEMA.indexOf(b.mes) - MESES_SISTEMA.indexOf(a.mes));
 
-        let restante = montoMesActual;
-        let distLog = `AUTORIZADO POR SUPER ADMIN. `;
+      const disponibleAcumulado = lineasAcumuladas.reduce((a, b) => a + b.monto_actual, 0);
+      let montoADescontar = disponibleAcumulado;
+      let montoAsobregirar = sol.monto_lps - disponibleAcumulado;
+      let mesDestino = mesGastoIdx + 1 < 12 ? MESES_SISTEMA[mesGastoIdx + 1] : "Sig. Periodo";
+      const refUnica = `APR-${sol.id}`;
 
-        for (let l of lineasAcumuladas) {
-            if (restante <= 0) break;
-            let quitar = Math.min(l.monto_actual, restante);
-            await supabase.from('presupuestos').update({ monto_actual: l.monto_actual - quitar }).eq('id', l.id);
-            distLog += `${l.mes}: L${quitar.toLocaleString()}. `;
-            restante -= quitar;
+      let restante = montoADescontar;
+      let distLog = `AUTORIZADO POR SUPER ADMIN. `;
+      const descuentosPorMes = [];
+
+      for (let l of lineasAcumuladas) {
+        if (restante <= 0) break;
+        let quitar = Math.min(l.monto_actual, restante);
+        if (quitar > 0) {
+          descuentosPorMes.push({ linea: l, quitar, esMesAnterior: l.mes !== mesActualNombre });
+          distLog += `${l.mes}: L${quitar.toLocaleString()}. `;
+          restante -= quitar;
         }
+      }
 
-        const lSiguiente = lineas.find(l => l.linea_nombre === lineaSel.linea_nombre && l.responsable === lineaSel.responsable && MESES_SISTEMA.indexOf(l.mes) === mesGastoIdx + 1);
-        if (lSiguiente) {
-            await supabase.from('presupuestos').update({ monto_actual: lSiguiente.monto_actual - montoAsobregirar }).eq('id', lSiguiente.id);
-            await supabase.from('compras').insert([{ 
-                presupuesto_id: lSiguiente.id, monto_lps: montoAsobregirar, descripcion: `${sol.descripcion} | REF:${refUnica}`, 
-                fecha: sol.fecha, url_factura: sol.url_factura, creado_por: "SISTEMA", es_arrastre: true, dist_info: distLog + `${mesDestino}: L${montoAsobregirar.toLocaleString()}.`
-            }]);
-        }
+      const usaSaldoAnterior = descuentosPorMes.some(d => d.esMesAnterior);
 
-        await supabase.from('compras').insert([{ 
-            presupuesto_id: lineaSel.id, monto_lps: montoMesActual, descripcion: `${sol.descripcion} | REF:${refUnica}`, 
-            fecha: sol.fecha, url_factura: sol.url_factura, creado_por: sol.solicitado_por,
-            es_sobregiro: true, monto_excedente: montoAsobregirar, mes_excedente: mesDestino, dist_info: distLog
+      for (let d of descuentosPorMes) {
+        await supabase.from('presupuestos').update({ monto_actual: d.linea.monto_actual - d.quitar }).eq('id', d.linea.id);
+      }
+
+      // Registros de cargo externo en meses anteriores tocados
+      for (let d of descuentosPorMes.filter(d => d.esMesAnterior)) {
+        await supabase.from('compras').insert([{
+          presupuesto_id: d.linea.id,
+          monto_lps: d.quitar,
+          descripcion: `Cargo desde ${mesActualNombre} (${sol.descripcion}) | REF:${refUnica}`,
+          fecha: sol.fecha,
+          url_factura: sol.url_factura,
+          creado_por: "SISTEMA",
+          es_arrastre: true,
+          dist_info: `Saldo de ${d.linea.mes} utilizado en factura registrada en ${mesActualNombre}. Total factura: L${sol.monto_lps.toLocaleString()}.`
         }]);
-        await supabase.from('solicitudes_sobregiro').update({ estado: 'APROBADO' }).eq('id', sol.id);
-        
-        alert("✅ Gasto autorizado y procesado.");
-        obtenerDatos();
+      }
+
+      // Sobregiro al mes siguiente
+      const lSiguiente = lineas.find(l => l.linea_nombre === lineaSel.linea_nombre && l.responsable === lineaSel.responsable && MESES_SISTEMA.indexOf(l.mes) === mesGastoIdx + 1);
+      if (lSiguiente) {
+        await supabase.from('presupuestos').update({ monto_actual: lSiguiente.monto_actual - montoAsobregirar }).eq('id', lSiguiente.id);
+        await supabase.from('compras').insert([{
+          presupuesto_id: lSiguiente.id, monto_lps: montoAsobregirar,
+          descripcion: `${sol.descripcion} | REF:${refUnica}`,
+          fecha: sol.fecha, url_factura: sol.url_factura, creado_por: "SISTEMA",
+          es_arrastre: true,
+          dist_info: distLog + `${mesDestino}: L${montoAsobregirar.toLocaleString()}.`
+        }]);
+      }
+
+      await supabase.from('compras').insert([{
+        presupuesto_id: lineaSel.id,
+        monto_lps: montoADescontar,
+        descripcion: `${sol.descripcion} | REF:${refUnica}`,
+        fecha: sol.fecha,
+        url_factura: sol.url_factura,
+        creado_por: sol.solicitado_por,
+        es_sobregiro: true,
+        monto_excedente: montoAsobregirar,
+        mes_excedente: mesDestino,
+        dist_info: distLog,
+        usa_saldo_anterior: usaSaldoAnterior   // ← NUEVO FLAG
+      }]);
+
+      await supabase.from('solicitudes_sobregiro').update({ estado: 'APROBADO' }).eq('id', sol.id);
+      alert("✅ Gasto autorizado y procesado.");
+      obtenerDatos();
     } catch (e) { alert(e.message); } finally { setLoading(false); }
   };
 
@@ -262,10 +348,10 @@ function App() {
     const tP = filtradas.reduce((a, b) => a + b.monto_inicial, 0);
     const tD = filtradas.reduce((a, b) => a + b.monto_actual, 0);
     const porTipoGasto = ["Administracion", "Personal", "Venta"].map(t => {
-        const sub = filtradas.filter(l => normalizar(l.tipo_gasto || "") === normalizar(t));
-        const ini = sub.reduce((a, b) => a + b.monto_inicial, 0);
-        const act = sub.reduce((a, b) => a + b.monto_actual, 0);
-        return { tipo: t, inicial: ini, gastado: ini - act };
+      const sub = filtradas.filter(l => normalizar(l.tipo_gasto || "") === normalizar(t));
+      const ini = sub.reduce((a, b) => a + b.monto_inicial, 0);
+      const act = sub.reduce((a, b) => a + b.monto_actual, 0);
+      return { tipo: t, inicial: ini, gastado: ini - act };
     });
     return { totalP: tP, totalG: tP - tD, totalD: tD, ranking, porTipoGasto, porcGlobal: tP > 0 ? ((tP - tD) / tP) * 100 : 0 };
   }, [lineas, tiendaActiva, mesFiltro, tipoVista, consolidarAnalisis]);
@@ -279,15 +365,15 @@ function App() {
       base.forEach(h => {
         const refMatch = h.descripcion?.match(/REF:(REF-\d+|APR-\d+)/);
         const ref = refMatch ? refMatch[1] : `ID-${h.id}`;
-        if (!agrupado[ref]) agrupado[ref] = { ...h, monto_lps: 0, mostrarInfoAnual: h.es_sobregiro || h.es_arrastre };
+        if (!agrupado[ref]) agrupado[ref] = { ...h, monto_lps: 0, mostrarInfoAnual: h.es_sobregiro || h.es_arrastre || h.usa_saldo_anterior };
         agrupado[ref].monto_lps += h.monto_lps;
-        if (h.es_sobregiro || h.es_arrastre) agrupado[ref].mostrarInfoAnual = true;
+        if (h.es_sobregiro || h.es_arrastre || h.usa_saldo_anterior) agrupado[ref].mostrarInfoAnual = true;
       });
       base = Object.values(agrupado);
     }
     return base.filter(h => 
-        h.descripcion?.toLowerCase().includes(busquedaHistorial.toLowerCase()) || 
-        h.presupuestos?.linea_nombre?.toLowerCase().includes(busquedaHistorial.toLowerCase())
+      h.descripcion?.toLowerCase().includes(busquedaHistorial.toLowerCase()) || 
+      h.presupuestos?.linea_nombre?.toLowerCase().includes(busquedaHistorial.toLowerCase())
     );
   }, [historial, tiendaActiva, tipoVista, mesFiltro, busquedaHistorial]);
 
@@ -298,7 +384,14 @@ function App() {
 
   if (!session) return (
     <div style={loginWrapper}>
-      <div style={loginCard}><h1 style={{color: COLOR_PIKHN, fontWeight:800}}>PIKHN</h1><form onSubmit={async (e)=>{e.preventDefault(); const {error}=await supabase.auth.signInWithPassword({email, password}); if(error) alert("Error de acceso");}}><input type="email" placeholder="Usuario" style={inputStyle} onChange={e=>setEmail(e.target.value)} /><input type="password" placeholder="Contraseña" style={inputStyle} onChange={e=>setPassword(e.target.value)} /><button type="submit" style={{...btn, background: COLOR_PIKHN, color: 'white'}}>INGRESAR</button></form></div>
+      <div style={loginCard}>
+        <h1 style={{color: COLOR_PIKHN, fontWeight:800}}>PIKHN</h1>
+        <form onSubmit={async (e) => { e.preventDefault(); const {error} = await supabase.auth.signInWithPassword({email, password}); if(error) alert("Error de acceso"); }}>
+          <input type="email" placeholder="Usuario" style={inputStyle} onChange={e=>setEmail(e.target.value)} />
+          <input type="password" placeholder="Contraseña" style={inputStyle} onChange={e=>setPassword(e.target.value)} />
+          <button type="submit" style={{...btn, background: COLOR_PIKHN, color: 'white'}}>INGRESAR</button>
+        </form>
+      </div>
     </div>
   );
 
@@ -311,215 +404,254 @@ function App() {
 
       <main style={mainStyle}>
         {(seccion !== 'compras' && seccion !== 'config' && seccion !== 'pendientes') && (
-            <div style={card}>
-                <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', gap:'10px'}}>
-                    <div style={toggleContainer}><button onClick={()=>setTipoVista('mensual')} style={tipoVista==='mensual'?toggleActive:toggleInactive}>MES</button><button onClick={()=>setTipoVista('anual')} style={tipoVista==='anual'?toggleActive:toggleInactive}>AÑO</button></div>
-                    <div style={{display:'flex', gap:'10px', alignItems:'center'}}>
-                      <button onClick={() => {
-                        const data = stats.ranking.map(l => ({ "Línea": l.nombre, "Tienda": l.r, "Presupuesto": l.inicial, "Gastado": l.inicial - l.actual, "Saldo": l.actual }));
-                        const ws = XLSX.utils.json_to_sheet(data);
-                        const wb = XLSX.utils.book_new();
-                        XLSX.utils.book_append_sheet(wb, ws, "Reporte");
-                        XLSX.writeFile(wb, `Reporte_General.xlsx`);
-                      }} style={{background:'none', border:'none', color:COLOR_AZUL_CONTABLE, cursor:'pointer'}}><FileSpreadsheet size={20}/></button>
-                      {esAdmin && <select style={{...inputStyle, width:'auto', marginBottom:0, padding:'6px'}} value={tiendaFiltro} onChange={e=>setTiendaFiltro(e.target.value)}><option value="TODAS">TODAS</option><option value="SPS">SPS</option><option value="Choluteca">Choluteca</option><option value="VA">VA</option><option value="Nacional">Nacional</option></select>}
-                    </div>
-                </div>
-                {tipoVista === 'mensual' && <select style={{...inputStyle, marginTop:'10px', marginBottom:0}} value={mesFiltro} onChange={e=>setMesFiltro(e.target.value)}>{MESES_SISTEMA.map(m=><option key={m} value={m}>{m}</option>)}</select>}
+          <div style={card}>
+            <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', gap:'10px'}}>
+              <div style={toggleContainer}>
+                <button onClick={()=>setTipoVista('mensual')} style={tipoVista==='mensual'?toggleActive:toggleInactive}>MES</button>
+                <button onClick={()=>setTipoVista('anual')} style={tipoVista==='anual'?toggleActive:toggleInactive}>AÑO</button>
+              </div>
+              <div style={{display:'flex', gap:'10px', alignItems:'center'}}>
+                <button onClick={() => {
+                  const data = stats.ranking.map(l => ({ "Línea": l.nombre, "Tienda": l.r, "Presupuesto": l.inicial, "Gastado": l.inicial - l.actual, "Saldo": l.actual }));
+                  const ws = XLSX.utils.json_to_sheet(data);
+                  const wb = XLSX.utils.book_new();
+                  XLSX.utils.book_append_sheet(wb, ws, "Reporte");
+                  XLSX.writeFile(wb, `Reporte_General.xlsx`);
+                }} style={{background:'none', border:'none', color:COLOR_AZUL_CONTABLE, cursor:'pointer'}}><FileSpreadsheet size={20}/></button>
+                {esAdmin && <select style={{...inputStyle, width:'auto', marginBottom:0, padding:'6px'}} value={tiendaFiltro} onChange={e=>setTiendaFiltro(e.target.value)}>
+                  <option value="TODAS">TODAS</option><option value="SPS">SPS</option><option value="Choluteca">Choluteca</option><option value="VA">VA</option><option value="Nacional">Nacional</option>
+                </select>}
+              </div>
             </div>
+            {tipoVista === 'mensual' && <select style={{...inputStyle, marginTop:'10px', marginBottom:0}} value={mesFiltro} onChange={e=>setMesFiltro(e.target.value)}>{MESES_SISTEMA.map(m=><option key={m} value={m}>{m}</option>)}</select>}
+          </div>
         )}
 
         {seccion === 'reportes' && (
-            <div style={{marginTop:'15px'}}>
-                <div style={dashboardGrid}>
-                    <div style={dashItemCard}><span style={dashLabel}>PRESUPUESTO</span><br/><b>L{stats.totalP.toLocaleString()}</b></div>
-                    <div style={{...dashItemCard, borderLeft:'1px solid #eee', borderRight:'1px solid #eee'}}><span style={dashLabel}>GASTADO</span><br/><b style={{color:'#dc2626'}}>L{stats.totalG.toLocaleString()}</b></div>
-                    <div style={dashItemCard}><span style={dashLabel}>DISPONIBLE</span><br/><b style={{color: COLOR_AZUL_CONTABLE}}>L{stats.totalD.toLocaleString()}</b></div>
-                </div>
-                <div style={{...card, marginTop:'15px'}}>
-                    <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'15px'}}>
-                        <h3 style={cardTitle}><History size={18}/> {tipoVista === 'anual' ? 'RESUMEN ANUAL' : 'HISTORIAL'}</h3>
-                        <div style={{display:'flex', alignItems:'center', gap:'6px', background:'#f1f5f9', padding:'4px 10px', borderRadius:'10px'}}>
-                          <Search size={12} color="#94a3b8"/><input type="text" placeholder="Buscar..." style={{border:'none', background:'none', fontSize:'11px', outline:'none', width:'80px'}} value={busquedaHistorial} onChange={e=>setBusquedaHistorial(e.target.value)}/>
-                        </div>
-                    </div>
-                    <div style={{maxHeight:'400px', overflowY:'auto'}}>
-                    {historialFinal.slice(0,30).map(h => {
-                        const descLimpia = h.descripcion?.split(' | REF:')[0];
-                        const mostrarInfo = tipoVista === 'mensual' ? (h.es_sobregiro || h.es_arrastre) : h.mostrarInfoAnual;
-                        return (
-                            <div key={h.id} style={historyItem}>
-                                <div style={{flex:1, paddingRight:'10px'}}>
-                                    <div style={{display:'flex', alignItems:'center', gap:'5px', marginBottom:'2px'}}>
-                                      <div style={{fontWeight:700, fontSize:'11px'}}>{h.presupuestos?.linea_nombre} {tiendaActiva === 'TODAS' && <span style={{fontSize:'8px', color:'#94a3b8'}}>({h.presupuestos?.responsable})</span>}</div>
-                                      {h.es_sobregiro && tipoVista === 'mensual' && <span style={badgeSobre}>Sobregiro</span>}
-                                      {h.es_arrastre && tipoVista === 'mensual' && <span style={badgeArrastre}>Arrastre</span>}
-                                    </div>
-                                    <div style={{fontSize:'10px', color:COLOR_PIKHN, fontWeight:600}}>{descLimpia}</div>
-                                    <div style={{fontSize:'8px', color:'#94a3b8'}}>{h.fecha}</div>
-                                </div>
-                                <div style={{textAlign:'right', display:'flex', alignItems:'center', gap:'8px'}}>
-                                    <div style={{display:'flex', flexDirection:'column', alignItems:'flex-end'}}>
-                                      <b style={{color: '#dc2626', fontWeight:800, fontSize:'12px'}}>-L{h.monto_lps.toLocaleString()}</b>
-                                      {h.es_sobregiro && tipoVista === 'mensual' && <div style={{fontSize:'7px', color:'#dc2626', fontWeight:700}}>+ L{h.monto_excedente.toLocaleString()} en {h.mes_excedente}</div>}
-                                    </div>
-                                    <div style={{display:'flex', gap:'4px'}}>
-                                      {mostrarInfo && <button onClick={()=>alert(`DETALLE:\n${h.dist_info?.replace(/\. /g, '\n') || 'Info no disponible'}`)} style={eyeBtn}><List size={14} color={COLOR_AZUL_CONTABLE}/></button>}
-                                      <button onClick={() => window.open(supabase.storage.from('facturas').getPublicUrl(h.url_factura).data.publicUrl, '_blank')} style={eyeBtn}><Eye size={16}/></button>
-                                    </div>
-                                </div>
-                            </div>
-                        );
-                    })}
-                    </div>
-                </div>
+          <div style={{marginTop:'15px'}}>
+            <div style={dashboardGrid}>
+              <div style={dashItemCard}><span style={dashLabel}>PRESUPUESTO</span><br/><b>L{stats.totalP.toLocaleString()}</b></div>
+              <div style={{...dashItemCard, borderLeft:'1px solid #eee', borderRight:'1px solid #eee'}}><span style={dashLabel}>GASTADO</span><br/><b style={{color:'#dc2626'}}>L{stats.totalG.toLocaleString()}</b></div>
+              <div style={dashItemCard}><span style={dashLabel}>DISPONIBLE</span><br/><b style={{color: COLOR_AZUL_CONTABLE}}>L{stats.totalD.toLocaleString()}</b></div>
             </div>
+            <div style={{...card, marginTop:'15px'}}>
+              <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'15px'}}>
+                <h3 style={cardTitle}><History size={18}/> {tipoVista === 'anual' ? 'RESUMEN ANUAL' : 'HISTORIAL'}</h3>
+                <div style={{display:'flex', alignItems:'center', gap:'6px', background:'#f1f5f9', padding:'4px 10px', borderRadius:'10px'}}>
+                  <Search size={12} color="#94a3b8"/>
+                  <input type="text" placeholder="Buscar..." style={{border:'none', background:'none', fontSize:'11px', outline:'none', width:'80px'}} value={busquedaHistorial} onChange={e=>setBusquedaHistorial(e.target.value)}/>
+                </div>
+              </div>
+              <div style={{maxHeight:'400px', overflowY:'auto'}}>
+                {historialFinal.slice(0,30).map(h => {
+                  const descLimpia = h.descripcion?.split(' | REF:')[0];
+                  const mostrarInfo = tipoVista === 'mensual'
+                    ? (h.es_sobregiro || h.es_arrastre || h.usa_saldo_anterior)
+                    : h.mostrarInfoAnual;
+
+                  // Detectar si es un "cargo externo": saldo de este mes usado en factura de mes posterior
+                  const esCargoExterno = h.es_arrastre && h.descripcion?.startsWith('Cargo desde');
+
+                  return (
+                    <div key={h.id} style={historyItem}>
+                      <div style={{flex:1, paddingRight:'10px'}}>
+                        <div style={{display:'flex', alignItems:'center', gap:'5px', marginBottom:'2px', flexWrap:'wrap'}}>
+                          <div style={{fontWeight:700, fontSize:'11px'}}>
+                            {h.presupuestos?.linea_nombre}
+                            {tiendaActiva === 'TODAS' && <span style={{fontSize:'8px', color:'#94a3b8'}}> ({h.presupuestos?.responsable})</span>}
+                          </div>
+                          {/* Factura con sobregiro al mes siguiente */}
+                          {h.es_sobregiro && tipoVista === 'mensual' && <span style={badgeSobre}>Sobregiro</span>}
+                          {/* Arrastre normal (cargo al mes siguiente por sobregiro especial) */}
+                          {h.es_arrastre && !esCargoExterno && tipoVista === 'mensual' && <span style={badgeArrastre}>Arrastre →</span>}
+                          {/* Cargo externo: dinero de este mes usado en factura de un mes posterior */}
+                          {esCargoExterno && tipoVista === 'mensual' && <span style={badgeCargoExterno}>← Cargo ext.</span>}
+                          {/* Factura que consumió saldo de meses anteriores */}
+                          {h.usa_saldo_anterior && tipoVista === 'mensual' && <span style={badgeSaldoAnterior}>↑ Saldo ant.</span>}
+                        </div>
+                        <div style={{fontSize:'10px', color:COLOR_PIKHN, fontWeight:600}}>{descLimpia}</div>
+                        <div style={{fontSize:'8px', color:'#94a3b8'}}>{h.fecha}</div>
+                      </div>
+                      <div style={{textAlign:'right', display:'flex', alignItems:'center', gap:'8px'}}>
+                        <div style={{display:'flex', flexDirection:'column', alignItems:'flex-end'}}>
+                          <b style={{color: '#dc2626', fontWeight:800, fontSize:'12px'}}>-L{h.monto_lps.toLocaleString()}</b>
+                          {h.es_sobregiro && tipoVista === 'mensual' && <div style={{fontSize:'7px', color:'#dc2626', fontWeight:700}}>+ L{h.monto_excedente?.toLocaleString()} en {h.mes_excedente}</div>}
+                        </div>
+                        <div style={{display:'flex', gap:'4px'}}>
+                          {mostrarInfo && (
+                            <button onClick={() => alert(`DETALLE:\n${h.dist_info?.replace(/\. /g, '\n') || 'Info no disponible'}`)} style={eyeBtn}>
+                              <List size={14} color={COLOR_AZUL_CONTABLE}/>
+                            </button>
+                          )}
+                          <button onClick={() => window.open(supabase.storage.from('facturas').getPublicUrl(h.url_factura).data.publicUrl, '_blank')} style={eyeBtn}><Eye size={16}/></button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
         )}
 
         {seccion === 'ejecucion' && (
-            <div style={{marginTop:'15px'}}>
-                <div style={card}>
-                    <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'15px'}}>
-                        <h3 style={cardTitle}><TrendingUp size={18}/> EJECUCIÓN</h3>
-                        <div style={{display:'flex', alignItems:'center', gap:'6px', background:'#f1f5f9', padding:'4px 10px', borderRadius:'10px'}}>
-                          <Search size={12} color="#94a3b8"/><input type="text" placeholder="Filtrar..." style={{border:'none', background:'none', fontSize:'11px', outline:'none', width:'100px'}} value={busquedaEjecucion} onChange={e=>setBusquedaEjecucion(e.target.value)}/>
-                        </div>
-                    </div>
-                    <div style={{width:'100%', background:'#f1f5f9', height:'12px', borderRadius:'10px', overflow:'hidden'}}><div style={{height:'100%', background: COLOR_PIKHN, width: `${Math.min(stats.porcGlobal, 100)}%`}}></div></div>
-                    <p style={{fontSize:'10px', fontWeight:800, marginTop:'8px', textAlign:'center'}}>{stats.porcGlobal.toFixed(1)}% CONSUMO {tiendaActiva}</p>
+          <div style={{marginTop:'15px'}}>
+            <div style={card}>
+              <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'15px'}}>
+                <h3 style={cardTitle}><TrendingUp size={18}/> EJECUCIÓN</h3>
+                <div style={{display:'flex', alignItems:'center', gap:'6px', background:'#f1f5f9', padding:'4px 10px', borderRadius:'10px'}}>
+                  <Search size={12} color="#94a3b8"/>
+                  <input type="text" placeholder="Filtrar..." style={{border:'none', background:'none', fontSize:'11px', outline:'none', width:'100px'}} value={busquedaEjecucion} onChange={e=>setBusquedaEjecucion(e.target.value)}/>
                 </div>
-                <div style={{...card, marginTop:'15px', maxHeight:'450px', overflowY:'auto'}}>
-                    {stats.ranking.filter(l => normalizar(l.nombre).includes(normalizar(busquedaEjecucion))).sort((a,b)=>(b.inicial-b.actual)-(a.inicial-a.actual)).map(linea => {
-                        const gastado = linea.inicial - linea.actual;
-                        const porc = linea.inicial > 0 ? (gastado / linea.inicial) * 100 : 0;
-                        const tieneSobre = tipoVista === 'mensual' && (linea.sobregiro_monto || 0) > 0;
-                        return (
-                            <div key={linea.nombre + (linea.r || '')} style={{marginBottom:'15px', borderBottom:'1px solid #f8fafc', paddingBottom:'10px'}}>
-                                <div style={{display:'flex', justifyContent:'space-between', marginBottom:'4px', alignItems:'center'}}>
-                                    <span style={{fontWeight:800, fontSize:'10px'}}>{linea.nombre.toUpperCase()} ({linea.r})</span>
-                                    {tieneSobre && <button onClick={() => alert(`AVISO:\nL${linea.sobregiro_monto.toLocaleString()} cargados a ${linea.sobregiro_mes_destino}.`)} style={{border:'none', background:'none', color:'#dc2626'}}><AlertCircle size={14}/></button>}
-                                </div>
-                                <div style={{width:'100%', background:'#f1f5f9', height:'6px', borderRadius:'10px', overflow:'hidden'}}><div style={{height:'100%', background: (porc > 90 || linea.actual < 0) ? '#dc2626' : COLOR_PIKHN, width: `${Math.min(porc, 100)}%`}}></div></div>
-                                <div style={{display:'flex', justifyContent:'space-between', fontSize:'9px', marginTop:'4px'}}><span>{porc.toFixed(0)}% Uso</span><span style={{color: COLOR_AZUL_CONTABLE, fontWeight:700}}>Saldo: L{linea.actual.toLocaleString()}</span></div>
-                            </div>
-                        );
-                    })}
-                </div>
+              </div>
+              <div style={{width:'100%', background:'#f1f5f9', height:'12px', borderRadius:'10px', overflow:'hidden'}}>
+                <div style={{height:'100%', background: COLOR_PIKHN, width: `${Math.min(stats.porcGlobal, 100)}%`}}></div>
+              </div>
+              <p style={{fontSize:'10px', fontWeight:800, marginTop:'8px', textAlign:'center'}}>{stats.porcGlobal.toFixed(1)}% CONSUMO {tiendaActiva}</p>
             </div>
+            <div style={{...card, marginTop:'15px', maxHeight:'450px', overflowY:'auto'}}>
+              {stats.ranking.filter(l => normalizar(l.nombre).includes(normalizar(busquedaEjecucion))).sort((a,b)=>(b.inicial-b.actual)-(a.inicial-a.actual)).map(linea => {
+                const gastado = linea.inicial - linea.actual;
+                const porc = linea.inicial > 0 ? (gastado / linea.inicial) * 100 : 0;
+                const tieneSobre = tipoVista === 'mensual' && (linea.sobregiro_monto || 0) > 0;
+                return (
+                  <div key={linea.nombre + (linea.r || '')} style={{marginBottom:'15px', borderBottom:'1px solid #f8fafc', paddingBottom:'10px'}}>
+                    <div style={{display:'flex', justifyContent:'space-between', marginBottom:'4px', alignItems:'center'}}>
+                      <span style={{fontWeight:800, fontSize:'10px'}}>{linea.nombre.toUpperCase()} ({linea.r})</span>
+                      {tieneSobre && <button onClick={() => alert(`AVISO:\nL${linea.sobregiro_monto.toLocaleString()} cargados a ${linea.sobregiro_mes_destino}.`)} style={{border:'none', background:'none', color:'#dc2626'}}><AlertCircle size={14}/></button>}
+                    </div>
+                    <div style={{width:'100%', background:'#f1f5f9', height:'6px', borderRadius:'10px', overflow:'hidden'}}>
+                      <div style={{height:'100%', background: (porc > 90 || linea.actual < 0) ? '#dc2626' : COLOR_PIKHN, width: `${Math.min(porc, 100)}%`}}></div>
+                    </div>
+                    <div style={{display:'flex', justifyContent:'space-between', fontSize:'9px', marginTop:'4px'}}>
+                      <span>{porc.toFixed(0)}% Uso</span>
+                      <span style={{color: COLOR_AZUL_CONTABLE, fontWeight:700}}>Saldo: L{linea.actual.toLocaleString()}</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
         )}
 
         {seccion === 'analisis' && esAdmin && (
-            <div style={{marginTop:'15px'}}>
-                <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'10px'}}>
-                  <h3 style={cardTitle}><BarChart3 size={18}/> CATEGORÍAS</h3>
-                  <button onClick={() => setConsolidarAnalisis(!consolidarAnalisis)} style={{...consolidateBtn, color: consolidarAnalisis ? COLOR_AZUL_CONTABLE : '#94a3b8'}}>
-                    {consolidarAnalisis ? <ToggleRight size={20}/> : <ToggleLeft size={20}/>}
-                    <span style={{fontSize:'9px', fontWeight:800}}>UNIFICAR</span>
-                  </button>
-                </div>
-                <div style={{display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:'8px', marginBottom:'15px'}}>
-                    {stats.porTipoGasto.map(cat => (
-                        <div key={cat.tipo} onClick={() => setTipoGastoFiltro(tipoGastoFiltro === cat.tipo ? null : cat.tipo)} style={{
-                            background: tipoGastoFiltro === cat.tipo ? COLOR_PIKHN : 'white',
-                            color: tipoGastoFiltro === cat.tipo ? 'white' : 'black',
-                            padding:'15px 5px', borderRadius:'15px', textAlign:'center', cursor:'pointer', border: '1px solid #eee'
-                        }}>
-                            <div style={{fontSize:'8px', fontWeight:800, opacity:0.8}}>{cat.tipo.toUpperCase()}</div>
-                            <div style={{fontSize:'11px', fontWeight:800, margin:'5px 0'}}>L{cat.gastado.toLocaleString()}</div>
-                        </div>
-                    ))}
-                </div>
-                {tipoGastoFiltro && (
-                    <div style={card}>
-                        <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'10px'}}>
-                            <h3 style={cardTitle}><ListFilter size={16}/> {tipoGastoFiltro.toUpperCase()}</h3>
-                            <div style={{display:'flex', alignItems:'center', gap:'8px'}}>
-                              <div style={{display:'flex', alignItems:'center', gap:'4px', background:'#f1f5f9', padding:'3px 8px', borderRadius:'8px'}}>
-                                <Search size={10} color="#94a3b8"/><input type="text" placeholder="Buscar..." style={{border:'none', background:'none', fontSize:'9px', outline:'none', width:'60px'}} value={busquedaAnalisis} onChange={e=>setBusquedaAnalisis(e.target.value)}/>
-                              </div>
-                              <button onClick={() => {
-                                const data = stats.ranking.filter(l => normalizar(l.tipo) === normalizar(tipoGastoFiltro)).map(l => ({ "Línea": l.nombre, "Presupuesto": l.inicial, "Gasto": l.inicial - l.actual, "Saldo": l.actual }));
-                                const ws = XLSX.utils.json_to_sheet(data);
-                                const wb = XLSX.utils.book_new();
-                                XLSX.utils.book_append_sheet(wb, ws, tipoGastoFiltro);
-                                XLSX.writeFile(wb, `Analisis_${tipoGastoFiltro}.xlsx`);
-                              }} style={{background:'none', border:'none', color:COLOR_AZUL_CONTABLE}}><Download size={18}/></button>
-                            </div>
-                        </div>
-                        <table style={{width:'100%', borderCollapse:'collapse', fontSize:'10px'}}>
-                            <thead><tr style={{borderBottom:'2px solid #f1f5f9', textAlign:'left'}}><th>LÍNEA</th><th style={{textAlign:'right'}}>PRESP.</th><th style={{textAlign:'right'}}>GASTO</th><th style={{textAlign:'right'}}>SALDO</th></tr></thead>
-                            <tbody>
-                                {stats.ranking.filter(l => normalizar(l.tipo) === normalizar(tipoGastoFiltro)).filter(l => normalizar(l.nombre).includes(normalizar(busquedaAnalisis))).map(l => (
-                                    <tr key={l.nombre + (l.r || '')} style={{borderBottom:'1px solid #f8fafc'}}>
-                                        <td style={{padding:'10px 0'}}>{l.nombre} {tiendaActiva === 'TODAS' && !consolidarAnalisis && <span style={{fontSize:'8px', color:'#94a3b8'}}>({l.r})</span>}</td>
-                                        <td style={{textAlign:'right', fontWeight:700}}>L{l.inicial.toLocaleString()}</td>
-                                        <td style={{textAlign:'right', color:'#dc2626'}}>L{(l.inicial-l.actual).toLocaleString()}</td>
-                                        <td style={{textAlign:'right', color:COLOR_AZUL_CONTABLE}}>L{l.actual.toLocaleString()}</td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    </div>
-                )}
+          <div style={{marginTop:'15px'}}>
+            <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'10px'}}>
+              <h3 style={cardTitle}><BarChart3 size={18}/> CATEGORÍAS</h3>
+              <button onClick={() => setConsolidarAnalisis(!consolidarAnalisis)} style={{...consolidateBtn, color: consolidarAnalisis ? COLOR_AZUL_CONTABLE : '#94a3b8'}}>
+                {consolidarAnalisis ? <ToggleRight size={20}/> : <ToggleLeft size={20}/>}
+                <span style={{fontSize:'9px', fontWeight:800}}>UNIFICAR</span>
+              </button>
             </div>
+            <div style={{display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:'8px', marginBottom:'15px'}}>
+              {stats.porTipoGasto.map(cat => (
+                <div key={cat.tipo} onClick={() => setTipoGastoFiltro(tipoGastoFiltro === cat.tipo ? null : cat.tipo)} style={{
+                  background: tipoGastoFiltro === cat.tipo ? COLOR_PIKHN : 'white',
+                  color: tipoGastoFiltro === cat.tipo ? 'white' : 'black',
+                  padding:'15px 5px', borderRadius:'15px', textAlign:'center', cursor:'pointer', border: '1px solid #eee'
+                }}>
+                  <div style={{fontSize:'8px', fontWeight:800, opacity:0.8}}>{cat.tipo.toUpperCase()}</div>
+                  <div style={{fontSize:'11px', fontWeight:800, margin:'5px 0'}}>L{cat.gastado.toLocaleString()}</div>
+                </div>
+              ))}
+            </div>
+            {tipoGastoFiltro && (
+              <div style={card}>
+                <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'10px'}}>
+                  <h3 style={cardTitle}><ListFilter size={16}/> {tipoGastoFiltro.toUpperCase()}</h3>
+                  <div style={{display:'flex', alignItems:'center', gap:'8px'}}>
+                    <div style={{display:'flex', alignItems:'center', gap:'4px', background:'#f1f5f9', padding:'3px 8px', borderRadius:'8px'}}>
+                      <Search size={10} color="#94a3b8"/>
+                      <input type="text" placeholder="Buscar..." style={{border:'none', background:'none', fontSize:'9px', outline:'none', width:'60px'}} value={busquedaAnalisis} onChange={e=>setBusquedaAnalisis(e.target.value)}/>
+                    </div>
+                    <button onClick={() => {
+                      const data = stats.ranking.filter(l => normalizar(l.tipo) === normalizar(tipoGastoFiltro)).map(l => ({ "Línea": l.nombre, "Presupuesto": l.inicial, "Gasto": l.inicial - l.actual, "Saldo": l.actual }));
+                      const ws = XLSX.utils.json_to_sheet(data);
+                      const wb = XLSX.utils.book_new();
+                      XLSX.utils.book_append_sheet(wb, ws, tipoGastoFiltro);
+                      XLSX.writeFile(wb, `Analisis_${tipoGastoFiltro}.xlsx`);
+                    }} style={{background:'none', border:'none', color:COLOR_AZUL_CONTABLE}}><Download size={18}/></button>
+                  </div>
+                </div>
+                <table style={{width:'100%', borderCollapse:'collapse', fontSize:'10px'}}>
+                  <thead><tr style={{borderBottom:'2px solid #f1f5f9', textAlign:'left'}}><th>LÍNEA</th><th style={{textAlign:'right'}}>PRESP.</th><th style={{textAlign:'right'}}>GASTO</th><th style={{textAlign:'right'}}>SALDO</th></tr></thead>
+                  <tbody>
+                    {stats.ranking.filter(l => normalizar(l.tipo) === normalizar(tipoGastoFiltro)).filter(l => normalizar(l.nombre).includes(normalizar(busquedaAnalisis))).map(l => (
+                      <tr key={l.nombre + (l.r || '')} style={{borderBottom:'1px solid #f8fafc'}}>
+                        <td style={{padding:'10px 0'}}>{l.nombre} {tiendaActiva === 'TODAS' && !consolidarAnalisis && <span style={{fontSize:'8px', color:'#94a3b8'}}>({l.r})</span>}</td>
+                        <td style={{textAlign:'right', fontWeight:700}}>L{l.inicial.toLocaleString()}</td>
+                        <td style={{textAlign:'right', color:'#dc2626'}}>L{(l.inicial-l.actual).toLocaleString()}</td>
+                        <td style={{textAlign:'right', color:COLOR_AZUL_CONTABLE}}>L{l.actual.toLocaleString()}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
         )}
 
         {seccion === 'pendientes' && esSuperAdmin && (
-            <div style={{marginTop:'15px'}}>
-                <h3 style={cardTitle}><Clock size={18}/> SOLICITUDES EN STANDBY</h3>
-                {solicitudes.length === 0 ? (
-                    <div style={{...card, textAlign:'center', color:'#94a3b8', marginTop:'10px'}}>No hay solicitudes pendientes.</div>
-                ) : (
-                    solicitudes.map(sol => (
-                        <div key={sol.id} style={{...card, marginTop:'10px', borderLeft:`4px solid ${COLOR_ACCENT}`}}>
-                            <div style={{display:'flex', justifyContent:'space-between', alignItems:'flex-start'}}>
-                                <div>
-                                    <b style={{fontSize:'12px'}}>{sol.presupuestos?.linea_nombre} ({sol.presupuestos?.responsable})</b>
-                                    <div style={{fontSize:'10px', color:COLOR_PIKHN}}>{sol.descripcion}</div>
-                                    <div style={{fontSize:'9px', color:'#94a3b8'}}>{sol.solicitado_por} • {sol.fecha}</div>
-                                </div>
-                                <b style={{color:'#dc2626'}}>L{sol.monto_lps.toLocaleString()}</b>
-                            </div>
-                            <div style={{display:'flex', gap:'10px', marginTop:'15px'}}>
-                                <button onClick={()=>window.open(supabase.storage.from('facturas').getPublicUrl(sol.url_factura).data.publicUrl, '_blank')} style={{...eyeBtn, flex:1, height:'40px'}}><Eye size={16}/></button>
-                                <button onClick={()=>gestionarSolicitud(sol, 'RECHAZAR')} style={{...btn, background:'#fee2e2', color:'#dc2626', padding:'0 15px', height:'40px', flex:1}}><XCircle size={18}/></button>
-                                <button onClick={()=>gestionarSolicitud(sol, 'APROBAR')} style={{...btn, background:'#dcfce7', color:'#16a34a', height:'40px', flex:3}}>AUTORIZAR GASTO</button>
-                            </div>
-                        </div>
-                    ))
-                )}
-            </div>
+          <div style={{marginTop:'15px'}}>
+            <h3 style={cardTitle}><Clock size={18}/> SOLICITUDES EN STANDBY</h3>
+            {solicitudes.length === 0 ? (
+              <div style={{...card, textAlign:'center', color:'#94a3b8', marginTop:'10px'}}>No hay solicitudes pendientes.</div>
+            ) : (
+              solicitudes.map(sol => (
+                <div key={sol.id} style={{...card, marginTop:'10px', borderLeft:`4px solid ${COLOR_ACCENT}`}}>
+                  <div style={{display:'flex', justifyContent:'space-between', alignItems:'flex-start'}}>
+                    <div>
+                      <b style={{fontSize:'12px'}}>{sol.presupuestos?.linea_nombre} ({sol.presupuestos?.responsable})</b>
+                      <div style={{fontSize:'10px', color:COLOR_PIKHN}}>{sol.descripcion}</div>
+                      <div style={{fontSize:'9px', color:'#94a3b8'}}>{sol.solicitado_por} • {sol.fecha}</div>
+                    </div>
+                    <b style={{color:'#dc2626'}}>L{sol.monto_lps.toLocaleString()}</b>
+                  </div>
+                  <div style={{display:'flex', gap:'10px', marginTop:'15px'}}>
+                    <button onClick={()=>window.open(supabase.storage.from('facturas').getPublicUrl(sol.url_factura).data.publicUrl, '_blank')} style={{...eyeBtn, flex:1, height:'40px'}}><Eye size={16}/></button>
+                    <button onClick={()=>gestionarSolicitud(sol, 'RECHAZAR')} style={{...btn, background:'#fee2e2', color:'#dc2626', padding:'0 15px', height:'40px', flex:1}}><XCircle size={18}/></button>
+                    <button onClick={()=>gestionarSolicitud(sol, 'APROBAR')} style={{...btn, background:'#dcfce7', color:'#16a34a', height:'40px', flex:3}}>AUTORIZAR GASTO</button>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
         )}
 
         {seccion === 'compras' && (
-            <div style={card}>
-                <h3 style={cardTitle}><Receipt size={18}/> REGISTRAR GASTO</h3>
-                <input type="date" style={inputStyle} value={compra.fecha} onChange={e=>setCompra({...compra, fecha:e.target.value, lineaId:''})} />
-                <select style={inputStyle} value={compra.tiendaSeleccionada} onChange={e=>setCompra({...compra, tiendaSeleccionada:e.target.value, lineaId:''})}><option value="">Tienda...</option><option value="SPS">SPS</option><option value="Choluteca">Choluteca</option><option value="VA">VA</option><option value="Nacional">Nacional</option></select>
-                <select style={inputStyle} value={compra.lineaId} onChange={e=>setCompra({...compra, lineaId:e.target.value})} disabled={!compra.tiendaSeleccionada}>
-                    <option value="">Línea...</option>
-                    {lineas?.length > 0 ? (
-                      lineas.filter(l => l.responsable === compra.tiendaSeleccionada && l.mes === MESES_SISTEMA[new Date(compra.fecha + 'T12:00:00').getMonth()]).map(l => {
-                        const saldo = calcularSaldoParaSelect(l.linea_nombre, l.responsable, compra.fecha);
-                        return <option key={l.id} value={l.id}>{l.linea_nombre} (L{saldo.toLocaleString()})</option>
-                      })
-                    ) : (
-                      <option disabled>Cargue el presupuesto primero</option>
-                    )}
-                </select>
-                <input type="number" placeholder="Monto" style={inputStyle} value={compra.monto} onChange={e=>setCompra({...compra, monto:e.target.value})} />
-                <input type="text" placeholder="Factura" style={inputStyle} value={compra.desc} onChange={e=>setCompra({...compra, desc:e.target.value})} />
-                <label style={{...cameraBtn, background: compra.foto ? '#dcfce7' : '#f1f5f9', color: compra.foto ? '#16a34a' : '#475569'}}>{compra.foto ? <Check size={16}/> : <Camera size={16}/>} {compra.foto ? "LISTA" : "FOTO"} <input type="file" hidden onChange={e=>setCompra({...compra, foto:e.target.files[0]})} /></label>
-                <button onClick={registrarGasto} style={{...btn, background: COLOR_PIKHN}} disabled={loading}>{loading ? "PROCESANDO..." : "REGISTRAR"}</button>
-            </div>
+          <div style={card}>
+            <h3 style={cardTitle}><Receipt size={18}/> REGISTRAR GASTO</h3>
+            <input type="date" style={inputStyle} value={compra.fecha} onChange={e=>setCompra({...compra, fecha:e.target.value, lineaId:''})} />
+            <select style={inputStyle} value={compra.tiendaSeleccionada} onChange={e=>setCompra({...compra, tiendaSeleccionada:e.target.value, lineaId:''})}>
+              <option value="">Tienda...</option><option value="SPS">SPS</option><option value="Choluteca">Choluteca</option><option value="VA">VA</option><option value="Nacional">Nacional</option>
+            </select>
+            <select style={inputStyle} value={compra.lineaId} onChange={e=>setCompra({...compra, lineaId:e.target.value})} disabled={!compra.tiendaSeleccionada}>
+              <option value="">Línea...</option>
+              {lineas?.length > 0 ? (
+                lineas.filter(l => l.responsable === compra.tiendaSeleccionada && l.mes === MESES_SISTEMA[new Date(compra.fecha + 'T12:00:00').getMonth()]).map(l => {
+                  const saldo = calcularSaldoParaSelect(l.linea_nombre, l.responsable, compra.fecha);
+                  return <option key={l.id} value={l.id}>{l.linea_nombre} (L{saldo.toLocaleString()})</option>;
+                })
+              ) : (
+                <option disabled>Cargue el presupuesto primero</option>
+              )}
+            </select>
+            <input type="number" placeholder="Monto" style={inputStyle} value={compra.monto} onChange={e=>setCompra({...compra, monto:e.target.value})} />
+            <input type="text" placeholder="Factura" style={inputStyle} value={compra.desc} onChange={e=>setCompra({...compra, desc:e.target.value})} />
+            <label style={{...cameraBtn, background: compra.foto ? '#dcfce7' : '#f1f5f9', color: compra.foto ? '#16a34a' : '#475569'}}>
+              {compra.foto ? <Check size={16}/> : <Camera size={16}/>} {compra.foto ? "LISTA" : "FOTO"}
+              <input type="file" hidden onChange={e=>setCompra({...compra, foto:e.target.files[0]})} />
+            </label>
+            <button onClick={registrarGasto} style={{...btn, background: COLOR_PIKHN}} disabled={loading}>{loading ? "PROCESANDO..." : "REGISTRAR"}</button>
+          </div>
         )}
 
         {seccion === 'config' && esAdmin && (
-            <div style={card}>
-                <h3 style={cardTitle}><UploadCloud size={18}/> CARGAR PRESUPUESTO</h3>
-                <input type="file" onChange={e=>setArchivoExcel(e.target.files[0])} style={{margin:'15px 0', fontSize:'12px'}} />
-                <button onClick={importarExcelPikHN} style={{...btn, background: COLOR_AZUL_CONTABLE}} disabled={loading}>{loading ? "CARGANDO..." : "CARGAR"}</button>
-            </div>
+          <div style={card}>
+            <h3 style={cardTitle}><UploadCloud size={18}/> CARGAR PRESUPUESTO</h3>
+            <input type="file" onChange={e=>setArchivoExcel(e.target.files[0])} style={{margin:'15px 0', fontSize:'12px'}} />
+            <button onClick={importarExcelPikHN} style={{...btn, background: COLOR_AZUL_CONTABLE}} disabled={loading}>{loading ? "CARGANDO..." : "CARGAR"}</button>
+          </div>
         )}
       </main>
 
@@ -527,13 +659,13 @@ function App() {
         <button onClick={()=>setSeccion('compras')} style={seccion==='compras'?navBtnActive:navBtn}><Receipt size={24}/><span>Registrar</span></button>
         <button onClick={()=>setSeccion('reportes')} style={seccion==='reportes'?navBtnActive:navBtn}><LayoutDashboard size={24}/><span>Panel</span></button>
         {esSuperAdmin && (
-            <button onClick={()=>setSeccion('pendientes')} style={seccion==='pendientes'?navBtnActive:navBtn}>
-                <div style={{position:'relative'}}>
-                    <Clock size={24}/>
-                    {solicitudes.length > 0 && <span style={notifBadge}>{solicitudes.length}</span>}
-                </div>
-                <span>Standby</span>
-            </button>
+          <button onClick={()=>setSeccion('pendientes')} style={seccion==='pendientes'?navBtnActive:navBtn}>
+            <div style={{position:'relative'}}>
+              <Clock size={24}/>
+              {solicitudes.length > 0 && <span style={notifBadge}>{solicitudes.length}</span>}
+            </div>
+            <span>Standby</span>
+          </button>
         )}
         <button onClick={()=>setSeccion('ejecucion')} style={seccion==='ejecucion'?navBtnActive:navBtn}><TrendingUp size={24}/><span>Ejecución</span></button>
         {esAdmin && <button onClick={()=>setSeccion('analisis')} style={seccion==='analisis'?navBtnActive:navBtn}><BarChart3 size={24}/><span>Análisis</span></button>}
@@ -543,6 +675,7 @@ function App() {
   );
 }
 
+// ─── Estilos ───────────────────────────────────────────────────────────────────
 const appContainer = { minHeight:'100vh', background:'#f8fafc', paddingBottom:'110px', fontFamily:"'Plus Jakarta Sans', sans-serif" };
 const loginWrapper = { display:'flex', height:'100vh', alignItems:'center', justifyContent:'center', background: COLOR_PIKHN };
 const loginCard = { background:'white', padding:'40px', borderRadius:'30px', textAlign:'center', width:'320px' };
@@ -567,8 +700,10 @@ const logoutBtn = { background:'rgba(255,255,255,0.1)', border:'none', color:'wh
 const eyeBtn = { background:'#f1f5f9', border:'none', padding:'6px', borderRadius:'6px', cursor:'pointer' };
 const consolidateBtn = { background:'none', border:'none', display:'flex', alignItems:'center', gap:'4px', cursor:'pointer' };
 const badgeBase = { fontSize:'8px', fontWeight:900, padding:'2px 6px', borderRadius:'4px' };
-const badgeSobre = { ...badgeBase, background: '#fee2e2', color: '#dc2626' };
-const badgeArrastre = { ...badgeBase, background: '#e0f2fe', color: '#0284c7' };
+const badgeSobre      = { ...badgeBase, background: '#fee2e2', color: '#dc2626' };           // Rojo  — sobregiro al mes siguiente
+const badgeArrastre   = { ...badgeBase, background: '#e0f2fe', color: '#0284c7' };           // Azul  — arrastre al mes siguiente
+const badgeCargoExterno = { ...badgeBase, background: '#fef9c3', color: '#b45309' };         // Amarillo — este mes cedió saldo a una factura de un mes posterior
+const badgeSaldoAnterior = { ...badgeBase, background: '#f3e8ff', color: '#7c3aed' };        // Violeta — esta factura usó saldo de meses anteriores
 const notifBadge = { position:'absolute', top:'-5px', right:'-8px', background:'#dc2626', color:'white', fontSize:'8px', padding:'2px 5px', borderRadius:'10px', fontWeight:800, border:'2px solid white' };
 
 export default App;
