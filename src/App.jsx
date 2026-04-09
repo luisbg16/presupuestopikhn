@@ -162,6 +162,11 @@ function App() {
       // ── Registros de "Cargo externo" en meses anteriores tocados ──────────
       // Aparecen en el historial de Enero/Febrero para que cuadren los números
       for (let d of descuentosPorMes.filter(d => d.esMesAnterior)) {
+        // Distribución completa ordenada: primero el mes del gasto, luego los anteriores
+        const resumenDistribucion = [
+          ...descuentosPorMes.filter(x => !x.esMesAnterior).map(x => `${x.linea.mes} (principal): L${x.quitar.toLocaleString()}`),
+          ...descuentosPorMes.filter(x => x.esMesAnterior).map(x => `${x.linea.mes} (apoyo): L${x.quitar.toLocaleString()}`)
+        ].join(' | ');
         await supabase.from('compras').insert([{
           presupuesto_id: d.linea.id,
           monto_lps: d.quitar,
@@ -170,7 +175,7 @@ function App() {
           url_factura: nombreFoto,
           creado_por: "SISTEMA",
           es_arrastre: true,
-          dist_info: `Saldo de ${d.linea.mes} utilizado en factura registrada en ${mesActualNombre}. Total factura: L${montoGasto.toLocaleString()}.`
+          dist_info: `Factura de L${montoGasto.toLocaleString()} registrada en ${mesActualNombre}. Distribución: ${resumenDistribucion}.`
         }]);
       }
 
@@ -268,6 +273,10 @@ function App() {
       }
 
       for (let d of descuentosPorMes.filter(d => d.esMesAnterior)) {
+        const resumenDistribucionSol = [
+          ...descuentosPorMes.filter(x => !x.esMesAnterior).map(x => `${x.linea.mes} (principal): L${x.quitar.toLocaleString()}`),
+          ...descuentosPorMes.filter(x => x.esMesAnterior).map(x => `${x.linea.mes} (apoyo): L${x.quitar.toLocaleString()}`)
+        ].join(' | ');
         await supabase.from('compras').insert([{
           presupuesto_id: d.linea.id,
           monto_lps: d.quitar,
@@ -276,7 +285,7 @@ function App() {
           url_factura: sol.url_factura,
           creado_por: "SISTEMA",
           es_arrastre: true,
-          dist_info: `Saldo de ${d.linea.mes} utilizado en factura registrada en ${mesActualNombre}. Total factura: L${sol.monto_lps.toLocaleString()}.`
+          dist_info: `Factura de L${sol.monto_lps.toLocaleString()} registrada en ${mesActualNombre} (AUTORIZADO). Distribución: ${resumenDistribucionSol}.`
         }]);
       }
 
@@ -396,9 +405,19 @@ function App() {
     );
   }, [historial, tiendaActiva, tipoVista, mesFiltro, busquedaHistorial]);
 
-  const calcularSaldoParaSelect = (lineaNombre, responsable, fecha) => {
+  // Saldo propio del mes seleccionado (sin acumular meses anteriores)
+  const calcularSaldoMes = (lineaNombre, responsable, fecha) => {
+    const mesNombre = MESES_SISTEMA[new Date(fecha + 'T12:00:00').getMonth()];
+    const linea = lineas.find(l => l.linea_nombre === lineaNombre && l.responsable === responsable && l.mes === mesNombre);
+    return linea?.monto_actual || 0;
+  };
+
+  // Sobrante acumulado de meses ANTERIORES (para mostrar como apoyo, no como saldo principal)
+  const calcularSobraAnterior = (lineaNombre, responsable, fecha) => {
     const mesIdx = new Date(fecha + 'T12:00:00').getMonth();
-    return lineas.filter(l => l.linea_nombre === lineaNombre && l.responsable === responsable && MESES_SISTEMA.indexOf(l.mes) <= mesIdx).reduce((a, b) => a + b.monto_actual, 0);
+    return lineas
+      .filter(l => l.linea_nombre === lineaNombre && l.responsable === responsable && MESES_SISTEMA.indexOf(l.mes) < mesIdx)
+      .reduce((a, b) => a + b.monto_actual, 0);
   };
 
   if (!session) return (
@@ -684,13 +703,35 @@ function App() {
               <option value="">Línea...</option>
               {lineas?.length > 0 ? (
                 lineas.filter(l => l.responsable === compra.tiendaSeleccionada && l.mes === MESES_SISTEMA[new Date(compra.fecha + 'T12:00:00').getMonth()]).map(l => {
-                  const saldo = calcularSaldoParaSelect(l.linea_nombre, l.responsable, compra.fecha);
-                  return <option key={l.id} value={l.id}>{l.linea_nombre} (L{saldo.toLocaleString()})</option>;
+                  const saldoMes = calcularSaldoMes(l.linea_nombre, l.responsable, compra.fecha);
+                  return <option key={l.id} value={l.id}>{l.linea_nombre} — L{saldoMes.toLocaleString()} disp.</option>;
                 })
               ) : (
                 <option disabled>Cargue el presupuesto primero</option>
               )}
             </select>
+            {/* Indicador de sobrante de meses anteriores disponible como respaldo */}
+            {compra.lineaId && (() => {
+              const lineaSel = lineas.find(l => l.id.toString() === compra.lineaId.toString());
+              if (!lineaSel) return null;
+              const sobrante = calcularSobraAnterior(lineaSel.linea_nombre, lineaSel.responsable, compra.fecha);
+              const saldoMes = calcularSaldoMes(lineaSel.linea_nombre, lineaSel.responsable, compra.fecha);
+              const mesNombre = MESES_SISTEMA[new Date(compra.fecha + 'T12:00:00').getMonth()];
+              return (
+                <div style={{background:'#f0f9ff', border:'1px solid #bae6fd', borderRadius:'10px', padding:'10px 14px', marginBottom:'10px', fontSize:'11px'}}>
+                  <div style={{display:'flex', justifyContent:'space-between', alignItems:'center'}}>
+                    <span style={{color:'#0369a1', fontWeight:700}}>📅 Disponible {mesNombre}:</span>
+                    <span style={{color: saldoMes >= 0 ? '#0369a1' : '#dc2626', fontWeight:800}}>L{saldoMes.toLocaleString()}</span>
+                  </div>
+                  {sobrante > 0 && (
+                    <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginTop:'4px', paddingTop:'4px', borderTop:'1px dashed #bae6fd'}}>
+                      <span style={{color:'#7c3aed', fontSize:'10px'}}>↑ Respaldo meses anteriores:</span>
+                      <span style={{color:'#7c3aed', fontWeight:700, fontSize:'10px'}}>+L{sobrante.toLocaleString()}</span>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
             <input type="number" placeholder="Monto" style={inputStyle} value={compra.monto} onChange={e=>setCompra({...compra, monto:e.target.value})} />
             <input type="text" placeholder="Factura" style={inputStyle} value={compra.desc} onChange={e=>setCompra({...compra, desc:e.target.value})} />
             <label style={{...cameraBtn, background: compra.foto ? '#dcfce7' : '#f1f5f9', color: compra.foto ? '#16a34a' : '#475569'}}>
